@@ -8,6 +8,11 @@ $(document).ready(function() {
      let data_for_graph;
      let profits_gains = {};
      let sharedXRange = null;
+     const formatMoney = (value) => {
+         const num = Number(value);
+         const safeNum = Number.isFinite(num) ? num : 0;
+         return safeNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+     };
 
     // Get Initial Game Info
     socket.emit('get_stats');
@@ -57,45 +62,85 @@ $(document).ready(function() {
 
     socket.on('round_over', (data) => {
         $('#errMsg').empty();
-        const profits = data["playerProfits"].map(p => `<li id="${p["id"]}" class="bid-unready">${p["player"]}: $${p["total"].toLocaleString()}</li>`).join("");
-        const profits_AE = data["playerProfitsAE"].map(p => `<li id="${p["id"]}" class="bid-unready">${p["player"]}: $${p["total"].toLocaleString()}</li>`).join("");
-
-        const gains = data["playerGainsBeforeEvent"].map(g => {
-            let color = ""
-            if (g["gain"] > 0) {
-                color = "positive"
-            } else if (g["gain"] < 0) {
-                color = "negative"
+        const profitsById = {};
+        data["playerProfits"].forEach(p => {
+            profitsById[p["id"]] = { name: p["player"], before: p["total"], after: null };
+        });
+        data["playerProfitsAE"].forEach(p => {
+            if (!profitsById[p["id"]]) {
+                profitsById[p["id"]] = { name: p["player"], before: null, after: p["total"] };
+            } else {
+                profitsById[p["id"]].after = p["total"];
             }
-            return `<li>${g["player"]}: <span class=${color}>$${g["gain"].toLocaleString()}</span></li>`
+        });
+
+        const roundDAByPlayer = {};
+        (data["playerRoundDA"] || []).forEach(p => {
+            roundDAByPlayer[p["player"]] = Number(p["gain"]) || 0;
+        });
+        const roundRTByPlayer = {};
+        (data["playerRoundRT"] || []).forEach(p => {
+            roundRTByPlayer[p["player"]] = Number(p["gain"]) || 0;
+        });
+
+        const profitRows = Object.entries(profitsById).map(([id, info]) => {
+            const roundDA = roundDAByPlayer[info.name] ?? 0;
+            const roundRT = roundRTByPlayer[info.name] ?? roundDA;
+            const change = roundRT - roundDA;
+            const changeClass = change > 0 ? "positive" : (change < 0 ? "negative" : "");
+            return `
+                <tr id="${id}" class="bid-unready">
+                    <td>${info.name}</td>
+                    <td>$${formatMoney(roundDA)}</td>
+                    <td><span class="${changeClass}">$${formatMoney(change)}</span></td>
+                    <td>$${formatMoney(roundRT)}</td>
+                </tr>
+            `;
         }).join("");
 
-        const gains_AE = data["playerGainsAE"].map(g => {
+        const gainsBeforeList = data["playerProfits"];
+        const gainsAfterList = data["playerProfitsAE"];
+
+        const gains = gainsBeforeList.map(g => {
             let color = ""
-            if (g["gain"] > 0) {
+            if (g["total"] > 0) {
                 color = "positive"
-            } else if (g["gain"] < 0) {
+            } else if (g["total"] < 0) {
                 color = "negative"
             }
-            return `<li>${g["player"]}: <span class=${color}>$${g["gain"].toLocaleString()}</span></li>`
+            return `<li>${g["player"]}: <span class=${color}>$${formatMoney(g["total"])}</span></li>`
         }).join("");
 
-        $('#playerProfits').html(profits);
+        const gains_AE = gainsAfterList.map(g => {
+            let color = ""
+            if (g["total"] > 0) {
+                color = "positive"
+            } else if (g["total"] < 0) {
+                color = "negative"
+            }
+            return `<li>${g["player"]}: <span class=${color}>$${formatMoney(g["total"])}</span></li>`
+        }).join("");
+
+        $('#playerProfitTableBody').html(profitRows);
         $('#playerGains').html(gains);
         $('#round').html(data["roundNumber"]);
         $('#form-submit').html("<h1>Waiting for all bids...</h1>");
 
         currentPhase = 0;
         data_for_graph = data;
-        profits_gains["profits"] = profits;
-        profits_gains["profits_AE"] = profits_AE;
+        profits_gains["profits_table"] = profitRows;
         profits_gains["gains"] = gains;
         profits_gains["gains_AE"] = gains_AE;
         
         sharedXRange = null;
         updateGraph(data, currentPhase); 
         
-        
+        console.log("ROUND_OVER keys:", Object.keys(data));
+        console.log("DA price/demand:", data.P_DA, data.graphData?.demand, data.graphData?.marketPrice);
+        console.log("AE price/demand:", data.P_RT, data.graphDataAE?.demand, data.graphDataAE?.marketPrice);
+        console.log("profits:", data.playerProfits);
+        console.log("profitsAE:", data.playerProfitsAE);
+
     });
 
     socket.on('update_phase', (data) => {
@@ -116,6 +161,8 @@ $(document).ready(function() {
         }
 
         if (data["allBid"]) {
+        const halfUnits = Math.trunc(data["marketUnits"] / 2);
+        const quarterUnits = Math.trunc(data["marketUnits"] / 4);
         const form = `
             <form method="POST" id="round-form">
                 <label for="slider">Slider:</label>
@@ -132,9 +179,20 @@ $(document).ready(function() {
                 <label><input type="radio" name="event" value="remove_renewable"> Remove Renewable Generators</label><br>
                 <label><input type="radio" name="event" value="remove_by_asset_name"> Remove Generators by Asset Name</label><br>
                 <label><input type="radio" name="event" value="remove_by_bid_price"> Remove Generators by Bid Price</label><br>
+                <label><input type="radio" name="event" value="penalty_high_bid"> Regulator Intervention</label><br>
                 <label><input type="radio" name="event" value="none"> None </label><br>
 
                 <div id="assetDropdownContainer" style="display:none; margin-top:10px;"></div>
+                <div id="demandEventContainer" style="display:none; margin-top:10px;">
+                    <p id="demandEventLabel">Demand change (MW):</p>
+                    <input type="range"
+                        id="eventDemandAdjust"
+                        name="eventDemandAdjust"
+                        min="0"
+                        max="${halfUnits}"
+                        value="${quarterUnits}">
+                    <span id="eventDemandAdjustValue">${quarterUnits}</span> MW
+                </div>
 
                 <input type="hidden" name="marketUnits" value="${data["marketUnits"]}">
 
@@ -151,6 +209,10 @@ $(document).ready(function() {
 
             // Cache the container
             const $dropdownContainer = $('#assetDropdownContainer');
+            const $demandEventContainer = $('#demandEventContainer');
+            const $demandEventLabel = $('#demandEventLabel');
+            const $eventDemandAdjust = $('#eventDemandAdjust');
+            const $eventDemandAdjustValue = $('#eventDemandAdjustValue');
 
             // Attach event listener to radio buttons within the newly inserted form
             $('#round-form').on('change', 'input[name="event"]', function () {
@@ -158,7 +220,7 @@ $(document).ready(function() {
 
                 if (selectedValue === 'remove_by_asset_name') {
                     $dropdownContainer.empty().show();
-
+                    const assetList = data['assetNames'];
                     const $label = $('<p>').text('Select assets:');
                     $dropdownContainer.append($label);
 
@@ -185,7 +247,7 @@ $(document).ready(function() {
                 }
                 else if (selectedValue === 'remove_by_bid_price') {
                     $dropdownContainer.empty().show();
-
+                    const bidList = data['bidPrices'];
                     const $label = $('<p>').text('Select prices:');
                     $dropdownContainer.append($label);
 
@@ -213,7 +275,20 @@ $(document).ready(function() {
                 else {
                     $dropdownContainer.hide().empty();
                 }
+                if (selectedValue === 'high_dem') {
+                    $demandEventLabel.text('Increase demand by (MW):');
+                    $demandEventContainer.show();
+                } else if (selectedValue === 'low_dem') {
+                    $demandEventLabel.text('Decrease demand by (MW):');
+                    $demandEventContainer.show();
+                } else {
+                    $demandEventContainer.hide();
+                }
             });
+            $('#round-form').on('input', '#eventDemandAdjust', function () {
+                $eventDemandAdjustValue.text($(this).val());
+            });            
+
         }
     });
 
@@ -246,11 +321,9 @@ $(document).ready(function() {
 
     function updateLeader(profits_gains, phase){
         if(phase ==0){
-            $('#playerProfits').html(profits_gains["profits"]);
             $('#playerGains').html(profits_gains["gains"]);
         }
         else if(phase ==1){
-            $('#playerProfits').html(profits_gains["profits_AE"]);
             $('#playerGains').html(profits_gains["gains_AE"]);
         }
         else{
@@ -259,6 +332,9 @@ $(document).ready(function() {
     }
 
     function updateGraph(data, phase) {
+        console.log("updateGraph phase=", phase);
+        console.log("graphData used:", phase === 0 ? data.graphData : data.graphDataAE);
+
 
         let config = {
             displayModeBar: false, // This removes the toolbar

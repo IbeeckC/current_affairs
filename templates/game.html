@@ -54,12 +54,27 @@
             </div>
         {% endif %}
         <div class="profit-container">
-            <h1>Player Total Profit</h1>
-            <ol id="playerProfits">
-                {% for player in ctx["room"]["playersData"] %}
-                    <li id="{{ player['id'] }}" class="bid-unready">{{ player["username"] }} $0</li>
-                {% endfor %}
-            </ol>
+            <h1>Player Profit Summary</h1>
+            <table id="playerProfitTable">
+                <thead>
+                    <tr>
+                        <th>Player</th>
+                        <th>DA Profit</th>
+                        <th>Change</th>
+                        <th>RT Profit</th>
+                    </tr>
+                </thead>
+                <tbody id="playerProfitTableBody">
+                    {% for player in ctx["room"]["playersData"] %}
+                        <tr id="{{ player['id'] }}" class="bid-unready">
+                            <td>{{ player["username"] }}</td>
+                            <td>$0</td>
+                            <td>$0</td>
+                            <td>$0</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
         <div class="gains-container">
             <h1>Player Round Gains</h1>

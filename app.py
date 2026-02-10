@@ -1,10 +1,16 @@
+
 from flask import Flask, request, session, render_template, redirect, url_for
 from flask_socketio import SocketIO, Namespace, join_room, leave_room, disconnect, emit
 from functools import wraps
 from dotenv import load_dotenv
 from urllib.parse import parse_qs
 from scipy.optimize import linprog
+import copy
+import numpy as np
+import scipy.sparse as sp
 from model import *
+from real_time_adjustment import apply_event_to_bids, solve_real_time_dispatch_qp, settle_day_ahead, settle_real_time, compute_real_time_full
+import osqp # for qpsolvers
 
 load_dotenv()
 
@@ -14,62 +20,293 @@ socketio = SocketIO(app, cors_allowed_origins='*', manage_session=False)
 
 room_manager = RoomManager()
 
+DEBUG = True
+
+def dbg(*args):
+    if DEBUG:
+        print(*args)
+
+EPS_CLEAR_ABS = 1e-2
+EPS_CLEAR_REL = 1e-3
+
+def clearance_eps(demand):
+    try:
+        dem = float(demand)
+    except (TypeError, ValueError):
+        dem = 0.0
+    return max(EPS_CLEAR_ABS, EPS_CLEAR_REL * dem)
+
+def apply_clearance_threshold(x, demand):
+    eps = clearance_eps(demand)
+    x = np.asarray(x, dtype=float)
+    x[x < eps] = 0.0
+    return x
+
+def compute_market_price_from_clearing(bids, x, demand, fallback=0.0):
+    eps = clearance_eps(demand)
+    market_price = None
+    for i, b in enumerate(bids):
+        if float(x[i]) >= eps:
+            market_price = float(b["price"])
+    if market_price is None:
+        return float(fallback)
+    return float(market_price)
+
+def allocate_by_price_equal_split(bids, demand):
+    remaining = max(float(demand), 0.0)
+    x = np.zeros(len(bids), dtype=float)
+    i = 0
+    eps_price = 1e-9
+
+    while i < len(bids) and remaining > 0.0:
+        price = float(bids[i]["price"])
+        group = []
+        group_qty = 0.0
+
+        while i < len(bids) and abs(float(bids[i]["price"]) - price) <= eps_price:
+            group.append(i)
+            group_qty += float(bids[i]["quantity"])
+            i += 1
+
+        if group_qty <= 0.0:
+            continue
+
+        if remaining >= group_qty:
+            for idx in group:
+                x[idx] = float(bids[idx]["quantity"])
+            remaining -= group_qty
+            continue
+
+        # Partial clearing within a price-tied group: split evenly with caps.
+        remaining_group = remaining
+        active = group[:]
+        while active and remaining_group > 0.0:
+            share = remaining_group / len(active)
+            next_active = []
+            for idx in active:
+                cap = float(bids[idx]["quantity"])
+                alloc = min(share, cap - x[idx])
+                if alloc > 0.0:
+                    x[idx] += alloc
+                    remaining_group -= alloc
+                if x[idx] + 1e-12 < cap:
+                    next_active.append(idx)
+            if len(next_active) == len(active):
+                # No progress due to numerical noise
+                break
+            active = next_active
+
+        remaining = 0.0
+
+    return x
+
 def linprog_to_graph(in_data, in_linprog, demand, marketPrice):
-    cur_width = 0
-    xList = []
-    widthBar = []
-    barHeight = []
-    colors = []
-    players = []
-    costs = []
-    assets = []
-    rand_color = get_random_rgba()
-    for index, p in enumerate(in_data):
-        if in_linprog[index] > 0 and in_linprog[index] < p["quantity"]:
-            # Line intersects bar
-            assets.append(p["asset"])
-            barHeight.append(p["price"])
-            xList.append(in_linprog[index] / 2 + cur_width)
-            widthBar.append(in_linprog[index])
-            # colors.append(f'rgba({rand_color[0]}, {rand_color[1]}, {rand_color[2]}, 1)')
-            colors.append(f'rgba({p["color"][0]}, {p["color"][1]}, {p["color"][2]}, 1)')
-            players.append(p["player"])
-            costs.append(p["generation"])
-            cur_width += in_linprog[index]
-            assets.append(p["asset"])
-            barHeight.append(p["price"])
-            xList.append(((p["quantity"] - in_linprog[index]) / 2 + cur_width))
-            widthBar.append(p["quantity"] - in_linprog[index])
-            # colors.append(f'rgba({rand_color[0]}, {rand_color[1]}, {rand_color[2]}, 0.25)')
-            colors.append(f'rgba({p["color"][0]}, {p["color"][1]}, {p["color"][2]}, 0.25)')
-            players.append(p["player"])
-            costs.append(p["generation"])
-            cur_width += p["quantity"] - in_linprog[index]
-        else:
-            assets.append(p["asset"])
-            barHeight.append(p["price"])
-            xList.append(p["quantity"] / 2 + cur_width)
-            widthBar.append(p["quantity"])
-            players.append(p["player"])
-            costs.append(p["generation"])
-            cur_width += p["quantity"]
-            if in_linprog[index] == 0:
-                # colors.append(f'rgba({rand_color[0]}, {rand_color[1]}, {rand_color[2]}, 0.25)')
-                colors.append(f'rgba({p["color"][0]}, {p["color"][1]}, {p["color"][2]}, 0.25)')
-            else:
-                # colors.append(f'rgba({rand_color[0]}, {rand_color[1]}, {rand_color[2]}, 1)')
-                colors.append(f'rgba({p["color"][0]}, {p["color"][1]}, {p["color"][2]}, 1)')
-    return  {
-                "barHeight": barHeight,
-                "xList": xList,
-                "widthBar": widthBar,
-                "colors": colors,
-                "demand": demand,
-                "marketPrice": marketPrice,
-                "players": players,
-                "costs": costs,
-                "assets": assets
-            }
+    import numpy as np
+
+    x = apply_clearance_threshold(in_linprog, demand)
+
+    assets, players, costs = [], [], []
+    barHeight, xList, widthBar, colors = [], [], [], []
+
+    total_cleared = float(np.sum(x))
+    cur_cleared = 0.0
+    cur_uncleared = total_cleared
+
+    for i, b in enumerate(in_data):
+        q = float(b["quantity"])
+        cleared = min(float(x[i]), q)
+        leftover = max(q - cleared, 0.0)
+
+        # --- CLEARED PORTION ---
+        if cleared > 0:
+            assets.append(b["asset"])
+            players.append(b["player"])
+            costs.append(b["generation"])
+            barHeight.append(b["price"])
+            xList.append(cur_cleared + cleared / 2)
+            widthBar.append(cleared)
+            colors.append(
+                f'rgba({b["color"][0]}, {b["color"][1]}, {b["color"][2]}, 1)'
+            )
+            cur_cleared += cleared
+
+        # --- LEFTOVER (UNCLEARED) PORTION ---
+        if leftover > 0:
+            assets.append(b["asset"])
+            players.append(b["player"])
+            costs.append(b["generation"])
+            barHeight.append(b["price"])
+            xList.append(cur_uncleared + leftover / 2)
+            widthBar.append(leftover)
+            colors.append(
+                f'rgba({b["color"][0]}, {b["color"][1]}, {b["color"][2]}, 0.25)'
+            )
+            cur_uncleared += leftover
+
+    return {
+        "barHeight": barHeight,
+        "xList": xList,
+        "widthBar": widthBar,
+        "colors": colors,
+        "demand": float(demand),
+        "marketPrice": float(marketPrice),
+        "players": players,
+        "costs": costs,
+        "assets": assets,
+    }
+
+def qp_day_ahead_clearing(sorted_bids, demand, lambda_reg=1e-4):
+    n = len(sorted_bids)
+    
+    # Extract prices and capacities
+    prices = np.array([bid['price'] for bid in sorted_bids], dtype=float)
+    capacities = np.array([bid['quantity'] for bid in sorted_bids], dtype=float)
+    dem = float(demand)
+    
+    # Check feasibility
+    total_supply = np.sum(capacities)
+    if total_supply < dem - 1e-6:
+        print(f"WARNING: Insufficient supply! Supply={total_supply:.1f}, Demand={dem:.1f}")
+        x = capacities.copy()
+        market_price = np.max(prices)  # Scarcity pricing
+        
+        x_by_id = {sorted_bids[i]["id"]: float(x[i]) for i in range(n)}
+
+        # Store results in bids
+        for i, bid in enumerate(sorted_bids):
+            bid['x_cleared'] = float(x[i])
+            bid['x_DA'] = float(x[i])
+        
+        return {
+            'x': x,
+            'x_by_id': x_by_id,
+            'market_price': market_price,
+            'total_cleared': float(np.sum(x)),
+            'bids': sorted_bids,
+            'is_scarcity': True,
+            'status': 'scarcity'
+        }
+    
+    # QP formulation
+    P = sp.eye(n, format='csc') * (2.0 * lambda_reg)
+    q = prices
+    
+    A = sp.vstack([
+        sp.eye(n, format='csc'),           # Box constraints (n rows)
+        sp.csc_matrix(np.ones((1, n)))     # Demand constraint (1 row)
+    ], format='csc')
+    
+    l = np.hstack([np.zeros(n), dem])      # Lower bounds
+    u = np.hstack([capacities, dem])       # Upper bounds
+    
+    # Solve
+    prob = osqp.OSQP()
+    prob.setup(P=P, q=q, A=A, l=l, u=u, verbose=False)
+    res = prob.solve()
+
+    if res.info.status_val not in (1, 2):  # 1=solved, 2=solved inaccurate (OSQP)
+        print(f"WARNING: OSQP did not solve DA properly. status={res.info.status}")
+        # Safe fallback: dispatch by merit order greedily
+        x = np.zeros(n, dtype=float)
+        remaining = dem
+        for i in range(n):
+            take = min(capacities[i], remaining)
+            x[i] = take
+            remaining -= take
+            if remaining <= 1e-9:
+                break
+        final_price = compute_uniform_price_from_dispatch(sorted_bids, x, dem)
+        x_by_id = {sorted_bids[i]["id"]: float(x[i]) for i in range(n)}
+        for i, bid in enumerate(sorted_bids):
+            bid['x_cleared'] = float(x[i])
+            bid['x_DA'] = float(x[i])
+        return {
+            'x': x,
+            'x_by_id': x_by_id,              # NEW
+            'market_price': float(final_price),
+            'shadow_price': None,
+            'total_cleared': float(np.sum(x)),
+            'bids': sorted_bids,
+            'is_scarcity': False,
+            'status': res.info.status
+        }
+    # Extract solution
+    x = np.maximum(np.asarray(res.x, dtype=float), 0.0)
+
+    # Numerical cleanup: keep very small values at 0
+    eps_x = 1e-9
+    x[np.abs(x) < eps_x] = 0.0
+
+    # Economic cleanup: clamp "dust" allocations and re-balance to demand
+    eps_clear = clearance_eps(dem)
+    x[np.abs(x) < eps_clear] = 0.0
+    gap = dem - float(np.sum(x))
+    if gap > 0.0:
+        # Refill gap in merit order while respecting capacities
+        for i in range(n):
+            available = float(capacities[i]) - float(x[i])
+            if available <= 0.0:
+                continue
+            take = min(available, gap)
+            x[i] += take
+            gap -= take
+            if gap <= 1e-9:
+                break
+    
+    dual_vars = res.y
+    marginal_price_from_dual = float(dual_vars[n])  # Dual of demand constraint
+    
+    # Alternative: compute market price from merit order of cleared units
+    # This matches economic theory: marginal unit sets the price
+    market_price = compute_uniform_price_from_dispatch(sorted_bids, x, dem)
+    final_price = market_price
+
+    x_by_id = {sorted_bids[i]["id"]: float(x[i]) for i in range(n)}
+    
+    # Store results in bid objects
+    for i, bid in enumerate(sorted_bids):
+        bid['x_cleared'] = float(x[i])
+        bid['x_DA'] = float(x[i])
+    
+    return {
+        'x': x,
+        'x_by_id': x_by_id,
+        'market_price': final_price,
+        'shadow_price': marginal_price_from_dual,
+        'total_cleared': float(np.sum(x)),
+        'bids': sorted_bids,
+        'is_scarcity': False,
+        'status': res.info.status
+    }
+
+
+def compute_uniform_price_from_dispatch(sorted_bids, x, demand):
+    eps_clear = clearance_eps(demand)
+    EPS_DEM = 1e-6
+
+    demand = float(demand)
+    x = np.asarray(x, dtype=float)
+
+    # cumulative cleared using economic threshold
+    cum = 0.0
+    market_price = None
+
+    for i, bid in enumerate(sorted_bids):
+        xi = float(x[i])
+        if xi > eps_clear:
+            cum += xi
+            market_price = float(bid["price"])  
+            if cum >= demand - EPS_DEM:
+                return market_price
+
+    # If we didn't "reach demand" under EPS_CLEAR, choose highest price among economically-cleared units.
+    cleared_prices = [float(sorted_bids[i]["price"]) for i in range(len(sorted_bids)) if float(x[i]) > eps_clear]
+    if cleared_prices:
+        return max(cleared_prices)
+
+    # If nothing is economically cleared, pick the minimum offer price (or 0) to avoid nonsense.
+    return float(min(float(b["price"]) for b in sorted_bids)) if sorted_bids else 0.0
+
 
 def login_required(f):
     @wraps(f)
@@ -192,7 +429,7 @@ class LobbyNamespace(Namespace):
         else:
             socketio.emit("player_left", {'msg': "gone"}, namespace='/lobby', to=request.sid)
 
-    def on_disconnect(self, reason):
+    def on_disconnect(self):
         room = session.get("room")
         name = session.get("name")
         lobby_room = room_manager.get_room(room)
@@ -222,6 +459,7 @@ class LobbyNamespace(Namespace):
         
         socketio.emit('game_start', {'message': 'Game is starting!'}, namespace='/lobby', to=room)
 
+
 class GameNamespace(Namespace):
     def on_connect(self):
         room = session.get("room")
@@ -237,7 +475,7 @@ class GameNamespace(Namespace):
         else:
             disconnect()
 
-    def on_disconnect(self, reason):
+    def on_disconnect(self): #" took out reason"
         room = session.get("room")
         leave_room(room)
         print("Game Disconnect")
@@ -389,9 +627,12 @@ class GameNamespace(Namespace):
 
     def on_run_round(self, data):
         print("Run Round")
+        
         room = session.get("room")
         name = session.get("name")
         game_room = room_manager.get_room(room)
+        dbg("room:", room, "admin:", game_room.get_admin(), "caller:", name)
+        dbg("raw payload:", data)
 
         if game_room.get_admin() != name:
             return
@@ -423,11 +664,18 @@ class GameNamespace(Namespace):
                         parsed_data_clean[key] = float(val)
                     except ValueError:
                         parsed_data_clean[key] = val
-
+        dbg("parsed_data_clean keys:", list(parsed_data_clean.keys()))
+        dbg("parsed_data_clean:", parsed_data_clean)
+        dbg("slider:", parsed_data_clean.get("slider"), "demand field:", parsed_data_clean.get("demand"))        
         event = parsed_data_clean["event"]
 
         all_bids = game_room.get_json_all_bids()
         sorted_bids = sorted(all_bids, key=lambda x: (x["price"], x["asset"]))
+        dbg("\n--- BIDS (sorted) ---")
+        for i, b in enumerate(sorted_bids):
+            dbg(f"{i:02d} id={b['id']} player={b['player']} asset={b['asset']} "
+                f"price={float(b['price'])} qty={float(b['quantity'])} cost={float(b['generation'])}")
+        dbg("--- END BIDS ---\n")
 
         prices = []
         quantities = []
@@ -436,46 +684,86 @@ class GameNamespace(Namespace):
             quantities.append(bid["quantity"])
         demand = parsed_data_clean["slider"]
 
-        c = prices #prices
-        u = quantities #quantities of each good
-        b_eq = [demand, 0]
+        #USING QP SOLVER TO AVOID ISSUES WITH LINPROG AND TIES
+        # Day-ahead market clearing with QP
+        clearing_result = qp_day_ahead_clearing(sorted_bids, demand, lambda_reg=1e-4)
 
-        #l = [0]*len(c)
-        A_eq = [[1]*len(c), [0]*len(c)]
-        bounds = []
-        for upper_bound in u:
-            bounds.append((0, upper_bound))
+        P_DA = float(clearing_result["market_price"])
+        x_DA_VEC = np.asarray(clearing_result["x"], dtype=float)
+        x_DA_VEC = allocate_by_price_equal_split(sorted_bids, demand)
 
-        #define the quantities cleared and market price  USING MAGIC
-        if sum(u) >= demand:
-            res = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
-            print(f"The marginal returned from LinProg: {res.eqlin['marginals']}")
-            print(f"The vector x returned from LinProg{res.x}\n\n")
-            market_price = res.eqlin["marginals"][0]
-            x = res.x
+        # Always treat IDs as the source of truth across phases
+        sorted_bids = clearing_result["bids"]  # may have been re-ordered by the solver wrapper
+
+        # Build x_DA_by_id explicitly from the returned vector + bid list
+        x_DA_by_id = {bid["id"]: float(x_DA_VEC[i]) for i, bid in enumerate(sorted_bids)}
+
+        eps_da = clearance_eps(demand)
+        # Recompute market price from meaningful cleared quantity (avoid epsilon noise)
+        if float(demand) <= eps_da:
+            P_DA = 0.0
         else:
-            market_price = max(c)
-            x = u
+            P_DA = compute_market_price_from_clearing(
+                sorted_bids,
+                x_DA_VEC,
+                demand,
+                fallback=P_DA
+            )
 
-        graphData = linprog_to_graph(sorted_bids, x, demand, market_price)
-        # TODO REDEFINE so that the bids are taken out at the lowest level (directly from the stuff passed back from the front end) Then put back more print statments
-        player_profits = []
-        player_gains = []
-        for index, bid in enumerate(sorted_bids):
-            gain = (market_price - bid["generation"]) * x[index]
-            player_profit = (market_price - bid["generation"]) * x[index]
-            player_gains.append({"player": bid["player"], "gain": gain})
-            player_profits.append({"player": bid["player"], "id": bid["id"], "total": bid["data"].get_profit() + player_profit})
+        dbg("\n--- DA CLEARING RESULT ---")
+        dbg("EPS_CLEAR (DA):", clearance_eps(demand))
+        dbg("P_DA:", P_DA)
+        dbg("x_DA_VEC:", x_DA_VEC, "sum(x):", float(np.sum(x_DA_VEC)), "demand:", float(demand))
 
-        sorted_player_profits = sorted(player_profits, key=lambda x: x["total"], reverse=True)
-        sorted_player_gains_before_event = sorted(player_gains, key=lambda x: x["gain"], reverse=True)
+        # Show row-by-row alignment (this catches phantom marginal + misalignment)
+        for i, b in enumerate(sorted_bids):
+            dbg(f"{i:02d} id={b['id']} price={float(b['price'])} qty={float(b['quantity'])} x={float(x_DA_VEC[i])}")
+
+        # Cleared IDs using your economic epsilon
+        cleared_ids = [sorted_bids[i]["id"] for i in range(len(sorted_bids)) if float(x_DA_VEC[i]) > eps_da]
+        dbg("cleared_ids:", cleared_ids)
+        dbg("--- END DA CLEARING ---\n")
+
+
+        graphData = linprog_to_graph(sorted_bids, x_DA_VEC, demand, P_DA)
+        dbg("\n--- GRAPH DATA (DA) ---")
+        dbg("EPS_CLEAR (DA):", clearance_eps(demand))
+        dbg("graph demand:", graphData["demand"], "graph marketPrice:", graphData["marketPrice"])
+        dbg("bars:", len(graphData["widthBar"]), "sum(widthBar):", float(sum(graphData["widthBar"])))
+        dbg("--- END GRAPH DATA (DA) ---\n")
+        # --- DA SETTLEMENT (persist profits exactly once) ---
+        da_per_bid, da_per_player = settle_day_ahead(
+            bids=sorted_bids,
+            P_DA=P_DA,
+            x_DA_by_id=x_DA_by_id
+        )
+        dbg("\n--- DA SETTLEMENT ---")
+        dbg("da_per_bid sample:", da_per_bid[:3])
+        dbg("da_per_player:", sorted(da_per_player, key=lambda x: x["gain"], reverse=True))
+        dbg("--- END DA SETTLEMENT ---\n")
+
+        # Leaderboards / UI ordering
+        sorted_player_gains_before_event = sorted(da_per_player, key=lambda x: x["gain"], reverse=True)
+        sorted_round_da = sorted(da_per_player, key=lambda x: x["gain"], reverse=True)
+
+        # Cumulative profit table (post-DA settlement)
+        player_profits_report = [
+            {"player": b["player"], "id": b["id"], "total": float(b["data"].get_profit())}
+            for b in sorted_bids
+        ]
+        sorted_player_profits = sorted(player_profits_report, key=lambda x: x["total"], reverse=True)
 
         # sorted_player_gains_post_event
         data_before_event =  {
                     "graphData": graphData,
                     "playerProfits": sorted_player_profits,
                     "playerGainsBeforeEvent": sorted_player_gains_before_event,
-                    "roundNumber": game_room.get_current_round() + 1
+                    "playerRoundDA": sorted_round_da,
+                    "roundNumber": game_room.get_current_round() + 1,
+                    "P_DA": P_DA,
+
+                    "x_DA_by_id": x_DA_by_id,
+                    "daPerBid": da_per_bid
                 }
         
         print(f"the marketUnits: {parsed_data_clean['marketUnits']}")
@@ -483,10 +771,23 @@ class GameNamespace(Namespace):
         # get list of assets and bids selected
         selected_assets = parsed_data_clean.get('assets', [])
         selected_bids = parsed_data_clean.get('bids', [])
+        event_demand_adjust = parsed_data_clean.get('eventDemandAdjust', 0)
         print(f"selected bids: {selected_bids}")
 
-        data_after_event = self.rand_event(sorted_bids, demand, event, parsed_data_clean["marketUnits"], market_price, min(prices), selected_assets, selected_bids)
-        
+        data_after_event = self.rand_event(
+            sorted_bids=sorted_bids,
+            demand=demand,
+            event=event,
+            marketUnits=parsed_data_clean["marketUnits"],
+            P_DA=P_DA,
+            x_DA_by_id=x_DA_by_id,
+            da_per_bid=da_per_bid,
+            selected_assets=selected_assets,
+            selected_bids=selected_bids,
+            event_demand_adjust=event_demand_adjust
+        )
+
+
         data = data_before_event | data_after_event
 
         
@@ -496,136 +797,196 @@ class GameNamespace(Namespace):
         game_room.set_all_players_bid_status(False)
         game_room.increment_round()
 
-    def rand_event(self, sorted_bids, demand, event, marketUnits, market_price_old, min_price, selected_assets, selected_bids):
-        #THIS IS WHERE THE EVENT HAPPENS
-        if event == "none":
-            event_name = "None"
-            # data =  {
-            #     "graphDataAfterEvent": None,
-            #     "playerProfitsAfterEvent": None,
-            #     "playerGainsAfterEvent": None,
-            # } 
-            print("No extra Events")
-            # return data
+    def rand_event(self, sorted_bids, demand, event, marketUnits, P_DA, x_DA_by_id, da_per_bid, selected_assets, selected_bids, event_demand_adjust = 0):
+        dbg("\n================= RAND EVENT =================")
+        dbg("event:", event, "P_DA:", P_DA, "demand_in:", float(demand))
+        dbg("x_DA_by_id:", x_DA_by_id)
+
+        event_bids, demand_new, meta = apply_event_to_bids(
+            sorted_bids=sorted_bids,
+            demand=demand,
+            event=event,
+            marketUnits=marketUnits,
+            market_price_DA=P_DA,
+            selected_assets=selected_assets,
+            selected_bids=selected_bids,
+            event_demand_adjust=event_demand_adjust,
+            x_DA_by_id=x_DA_by_id
+        )
+        dbg("\n--- APPLY EVENT OUTPUT ---")
+        dbg("meta:", meta)
+        dbg("demand_new:", float(demand_new), "delta:", float(demand_new) - float(demand))
+        dbg("num_bids before:", len(sorted_bids), "after:", len(event_bids))
+
+        # Show which IDs exist now (catch: removed bidder still referenced later)
+        dbg("event_bids ids:", [b["id"] for b in event_bids])
+
+        # If your meta has removed_ids / penalized_ids:
+        dbg("removed_ids:", meta.get("removed_ids"))
+        dbg("penalized_ids:", meta.get("penalized_ids"))
+        dbg("--- END APPLY EVENT ---\n")
+
+        event_name = meta.get("event_name", "None")
+        event_bids = sorted(event_bids, key=lambda b: (float(b["price"]), str(b["asset"])))
+
+        rt = solve_real_time_dispatch_qp(
+            event_bids=event_bids,
+            demand_new=demand_new,
+            x_DA_by_id=x_DA_by_id,
+            lambda_reg=1e-4
+        )
+        dbg("\n--- RT SOLVE ---")
+        dbg("EPS_CLEAR (RT):", clearance_eps(demand_new))
+        dbg("rt status:", rt.get("status"))
+        dbg("P_RT raw:", rt.get("P_RT"), "delta_D:", rt.get("delta_D"))
+
+        y_by_id = rt["y_by_id"]
+        x_rt_by_id = rt["x_rt_by_id"]
+
+        dbg("sum(y):", float(sum(y_by_id.values())))
+        dbg("sum(x_RT):", float(sum(x_rt_by_id.values())))
+        dbg("--- END RT SOLVE ---\n")
+
+        y_by_id = rt["y_by_id"]
+        x_rt_by_id = rt["x_rt_by_id"]
+        P_RT = rt["P_RT"]
+        delta_D = rt["delta_D"]
+
+        if P_RT is None:
+            P_RT = float(P_DA)
+
+        x_rt_vec = np.array(
+            [float(x_rt_by_id.get(b["id"], 0.0)) for b in event_bids],
+            dtype=float
+        )
+        x_rt_vec = allocate_by_price_equal_split(event_bids, demand_new)
+        eps_rt = clearance_eps(demand_new)
+        x_rt_vec = apply_clearance_threshold(x_rt_vec, demand_new)
+        x_rt_by_id = {b["id"]: float(x_rt_vec[i]) for i, b in enumerate(event_bids)}
+        # If not cleared in RT, zero out deviation so RT profit is zero.
+        for bid in event_bids:
+            bid_id = bid["id"]
+            if float(x_rt_by_id.get(bid_id, 0.0)) < eps_rt:
+                y_by_id[bid_id] = 0.0
+        P_RT = compute_market_price_from_clearing(
+            event_bids,
+            x_rt_vec,
+            demand_new,
+            fallback=P_RT
+        )
+
+        # Prepare data for after-event reporting
+        sorted_bids_for_graph = event_bids
+        x_for_graph = np.array([float(x_rt_by_id.get(b["id"], 0.0)) for b in sorted_bids_for_graph], dtype=float)
+        graphData = linprog_to_graph(sorted_bids_for_graph, x_for_graph, float(demand_new), float(P_RT))
+
+        dbg("\n--- GRAPH DATA (AE) ---")
+        dbg("graph demand:", graphData["demand"], "graph marketPrice:", graphData["marketPrice"])
+        dbg("bars:", len(graphData["widthBar"]), "sum(widthBar):", float(sum(graphData["widthBar"])))
+        dbg("--- END GRAPH DATA (AE) ---\n")
+
+
+        # --- RT FULL SETTLEMENT (re-clearing market) ---
+        rt_full_per_bid, rt_full_per_player = compute_real_time_full(
+            bids=event_bids,
+            P_RT=P_RT,
+            x_rt_by_id=x_rt_by_id
+        )
+
+        rt_full_by_id = {b["id"]: float(b.get("gain_RT_full", 0.0)) for b in rt_full_per_bid}
+        da_gain_by_bid_id = {b["id"]: float(b.get("gain_DA", 0.0)) for b in (da_per_bid or [])}
+        rt_delta_per_bid = []
+        rt_delta_by_player = {}
+
+        # Replace DA with RT (delta = RT_full - DA)
+        for b in sorted_bids:
+            bid_id = b["id"]
+            da_gain = float(da_gain_by_bid_id.get(bid_id, 0.0))
+            rt_full_gain = float(rt_full_by_id.get(bid_id, 0.0))
+            delta = rt_full_gain - da_gain
+
+            if abs(delta) < 1e-12:
+                delta = 0.0
+
+            b["data"].add_to_profit(delta)
+
+            rt_delta_per_bid.append({
+                "player": b["player"],
+                "id": bid_id,
+                "gain_RT": delta,
+                "x_RT": float(x_rt_by_id.get(bid_id, 0.0)),
+                "mc": float(b["generation"]),
+            })
+
+            rt_delta_by_player[b["player"]] = rt_delta_by_player.get(b["player"], 0.0) + delta
+
+        rt_per_bid = rt_delta_per_bid
+        rt_per_player = [{"player": p, "gain": g} for p, g in rt_delta_by_player.items()]
+
+        # If bidder removed by event, zero out TOTAL profit (not just round)
+        removed_ids = set(meta.get("removed_ids") or [])
+        if removed_ids:
+            bid_by_id = {b["id"]: b for b in sorted_bids}
+            rt_gain_by_player = {p["player"]: float(p["gain"]) for p in rt_per_player}
+
+            for bid_id in removed_ids:
+                bid = bid_by_id.get(bid_id)
+                if not bid:
+                    continue
+                current_total = float(bid["data"].get_profit())
+                if abs(current_total) < 1e-12:
+                    continue
+
+                # Wipe total profit to zero for removed bidders
+                bid["data"].add_to_profit(-current_total)
+
+                rt_per_bid.append({
+                    "player": bid["player"],
+                    "id": bid_id,
+                    "gain_RT": -current_total,
+                    "x_RT": float(x_rt_by_id.get(bid_id, 0.0)),
+                    "mc": float(bid["generation"]),
+                })
+
+                rt_gain_by_player[bid["player"]] = rt_gain_by_player.get(bid["player"], 0.0) - current_total
+
+            rt_per_player = [{"player": p, "gain": g} for p, g in rt_gain_by_player.items()]
+
+        # Cumulative profit table AFTER RT settlement (include all original bids)
+        player_profits = [
+            {"player": b["player"], "id": b["id"], "total": float(b["data"].get_profit())}
+            for b in sorted_bids
+        ]
+        dbg("\n--- RT SETTLEMENT ---")
+        dbg("rt_per_bid sample:", rt_per_bid[:3])
+        dbg("rt_per_player:", sorted(rt_per_player, key=lambda x: x["gain"], reverse=True))
+        dbg("profit totals sample:", player_profits[:3])
+        dbg("--- END RT SETTLEMENT ---\n")
         
-        elif event == "high_dem":
-            event_name = "Higher Demand"
-            try:
-                demand = random.randint(demand, int(min(demand+marketUnits*1/3, marketUnits*9/10)))
-            except:
-                demand = marketUnits
-
-        elif event == "low_dem":
-            event_name = "Lower Demand"
-            try:
-                demand = random.randint(int(max(demand-marketUnits*1/3, marketUnits*1/10)), demand)
-            except:
-                demand = 0
-
-        elif event == "high_bidder_remove":
-            event_name = "Remove Highest Cleared Bidder"
-            for bid in sorted_bids:
-                if bid['price'] == market_price_old:
-                    bid['price'] = 0
-                    bid['quantity'] = 0
-                    break
-
-        elif event == "low_bidder_remove":
-            event_name = "Remove Lowest Cleared Bidder"
-            # remove the quantity of the minimum price
-            for bid in sorted_bids:
-                if bid['price'] == min_price:
-                    bid['price'] = 0
-                    bid['quantity'] = 0
-                    break
-
-        elif event == "tax_coal&nat_gas":
-            event_name = "Tax on Coal and Natural Gas"
-            coal_natGas = ["Coal", "Natural Gas (Open Cycle)", "Coal-to-Liquid",
-                       "Natural Gas (Combined Cycle)","Shale Oil Power Generation"]
-            for bid in sorted_bids:
-                if bid["asset"] in coal_natGas:
-                    bid["generation"] = bid["generation"]+20 # add $20 tax
-
-        elif event == "remove_renewable":
-            event_name = "Remove Renewable Generators"
-            renewables = [
-                "Wind (onshore)", "Wind (Offshore)", "Solar Photovoltaic", "Concentrated Solar Power",
-                "Large-Scale Hydropower", "Geothermal", "Biomass (Wood)", "Biomass (Agricultural Waste)",
-                "Biogas (Landfills)", "Tidal Power", "Wave Power", "Concentrated Solar Thermal", "Algae Biofuel",
-                "Organic Photovoltaic", "Microgrids (Renewable)", "Ocean Thermal Energy Conversion"
-            ]
-            for bid in sorted_bids:
-                if bid["asset"] in renewables:
-                    bid['price'] = 0
-                    bid['quantity'] = 0
-
-        elif event == "remove_by_asset_name":
-            event_name = "Removed Some Bidders by Asset Name"
-            for bid in sorted_bids:
-                if bid["asset"] in selected_assets:
-                    bid['price'] = 0
-                    bid['quantity'] = 0
-
-        elif event == "remove_by_bid_price":
-            event_name = "Removed Some Bidders by Bid Price"
-            for bid in sorted_bids:
-                if bid["price"] in selected_bids:
-                    selected_bids.remove(bid["price"])
-                    bid['price'] = 0
-                    bid['quantity'] = 0
-
-        else:
-            print("Event Not Recognized")
+        # RT gains this event/phase (total RT market gains)
+        player_gains = rt_full_per_player
         
-
-        prices = []
-        quantities = []
-        for bid in sorted_bids:
-            prices.append(bid["price"])
-            quantities.append(bid["quantity"])
-
-        c = prices #prices
-        u = quantities #quantities of each good
-        b_eq = [demand, 0]
-
-        #l = [0]*len(c)
-        A_eq = [[1]*len(c), [0]*len(c)]
-        bounds = []
-        for upper_bound in u:
-            bounds.append((0, upper_bound))
-
-        #define the quantities cleared and market price  USING MAGIC
-        if sum(u) >= demand:
-            res = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
-            print(f"The marginal returned from LinProg: {res.eqlin['marginals']}")
-            print(f"The vector x returned from LinProg{res.x}\n\n")
-            market_price = res.eqlin["marginals"][0]
-            x = res.x
-        else:
-            market_price = max(c)
-            x = u
-
-        graphData = linprog_to_graph(sorted_bids, x, demand, market_price)
-        # TODO REDEFINE so that the bids are taken out at the lowest level (directly from the stuff passed back from the front end) Then put back more print statments
-        player_profits = []
-        player_gains = []
-        for index, bid in enumerate(sorted_bids):
-            gain = (market_price - bid["generation"]) * x[index]
-            bid["data"].add_to_profit((market_price - bid["generation"]) * x[index])
-            player_gains.append({"player": bid["player"], "gain": gain})
-            player_profits.append({"player": bid["player"], "id": bid["id"], "total": bid["data"].get_profit()})
         sorted_player_profits = sorted(player_profits, key=lambda x: x["total"], reverse=True)
         sorted_player_gains_after_event = sorted(player_gains, key=lambda x: x["gain"], reverse=True)
+        sorted_round_rt = sorted(rt_full_per_player, key=lambda x: x["gain"], reverse=True)
 
-        data =  {
-                    "event": {"event_name": event_name,"event_tag": event},
-                    "graphDataAE": graphData,
-                    "playerProfitsAE": sorted_player_profits,
-                    "playerGainsAE": sorted_player_gains_after_event,
-                } 
-          
-        return data 
+        data = {
+            "event": {"event_name": event_name, "event_tag": event},
+            "graphDataAE": graphData,             # after-event dispatch graph
+            "playerProfitsAE": sorted_player_profits,
+            "playerGainsAE": sorted_player_gains_after_event,
+            "playerRoundRT": sorted_round_rt,
+
+            "P_RT": float(P_RT),
+            "delta_D": float(delta_D),
+            "y_by_id": y_by_id,
+            "x_rt_by_id": x_rt_by_id,
+            "x_RT_by_id": x_rt_by_id,
+            "rtPerBid": rt_per_bid,
+            "eventMeta": meta,
+        }
+
+        return data
     
     @socketio.on('change_phase', namespace='/game')
     def handle_change_phase(data):
@@ -639,4 +1000,4 @@ socketio.on_namespace(LobbyNamespace('/lobby'))
 socketio.on_namespace(GameNamespace('/game'))
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5001, debug=True)

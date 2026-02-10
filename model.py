@@ -1,22 +1,33 @@
 import random
 import string
 
+# Asset format: (name, (Generation cost) , max generation capacity in MW)
 assets = [
-    ("Coal", 30, 2000),                         ("Natural Gas (Combined Cycle)", 95, 1000),
-    ("Natural Gas (Open Cycle)", 100, 500),     ("Nuclear", 90, 600),
-    ("Wind (onshore)", 2.5, 10),                ("Wind (Offshore)", 2.5, 10),
-    ("Solar Photovoltaic", 2.5, 500),           ("Concentrated Solar Power", 2.5, 100),
-    ("Large-Scale Hydropower", 15, 300),        ("Geothermal", 70, 70),
-    ("Biomass (Wood)", 25, 70),                 ("Biomass (Agricultural Waste)", 45, 30),
-    ("Biogas (Landfills)", 60, 10),             ("Tidal Power", 2.5, 3),
-    ("Wave Power", 2.5, 4),                     ("Hydrogen Fuel Cells", 100, 3),
-    ("Waste-to-Energy (Incineration)", 60, 10), ("Waste-to-Energy (Landfill Gas)", 50, 1),
-    ("Hydrogen Gas Turbine", 150, 200),         ("Compressed Air Energy", 50, 10),
-    ("Pumped Storage Hydroelectric", 20, 100),  ("Shale Oil Power Generation", 150, 10),
-    ("Coal-to-Liquid", 35, 100),                ("Concentrated Solar Thermal", 2.5, 50),
-    ("Organic Photovoltaic", 2.5, 1),           ("Microgrids (Renewable)", 10, 5),
-    ("Small Modular Reactors", 0, 100),         ("Ocean Thermal Energy Conversion", 2.5, 20),
-    ("Algae Biofuel", 80, 20),                  ("Magnetohydrodynamic", 10, 100) 
+    ("Coal", 30, 500),                         ("Natural Gas (Combined Cycle)", 70, 500),
+    ("Natural Gas (Open Cycle)", 101, 350),     ("Nuclear",3.0, 500),
+    ("Wind (onshore)", 1.25, 200),              ("Wind (Offshore)", 1.45, 300),
+    ("Solar Photovoltaic", 1.1, 250),         ("Concentrated Solar Power", 2.5, 150),
+    ("Large-Scale Hydropower", 2.1, 300),     ("Geothermal", 1.8, 100),
+    ("Biomass (Wood)", 12.5, 80),               ("Biomass (Agricultural Waste/Peat)", 45, 60),
+    ("Biogas (Landfills)", 60, 50),             ("Dual Fuel (Diesel & Natural Gas)", 110, 300),
+    ("Tidal Power", 2.4, 120),                ("Petroleom Coke", 83, 500),
+    ("Waste-to-Energy (Incineration)", 70, 70), ("Waste-to-Energy (Landfill Gas)", 50, 50),
+    ("Mini Hydropower", 2.1, 70),             ("Shale Oil", 150, 350),
+    ("Lignite", 60, 300),                        ("Fuel Oil", 200, 300),
+    ("Diesel", 300, 200),                       ("Biodiesel", 150, 60),
+    ("Small Modular Reactors", 3.0, 300),         ("Subbituminous coal", 46, 400),
+    ("Energy Storage", 2.4, 200),              ("Anthracite Coal", 55, 400),
+    ("Natural Gas (Open Cycle)", 101, 360), ("Natural Gas (Combined Cycle)", 70, 450),
+    ("Natural Gas (Open Cycle)", 101, 370), ("Natural Gas (Combined Cycle)", 70, 460),
+    ("Natural Gas (Open Cycle)", 101, 340), ("Natural Gas (Combined Cycle)", 70, 360),
+    ("Natural Gas (Open Cycle)", 101, 380), ("Natural Gas (Combined Cycle)", 70, 470),
+    ("Diesel", 300, 250),                   ("Diesel", 300, 180),
+    ("Diesel", 300, 270),                   ("Diesel", 300, 230),
+    ("Diesel", 300, 225),                   ("Coal", 30, 2000),
+    ("Coal", 30, 450),                     ("Coal", 30, 470),
+    ("Coal", 30, 455),                     ("Coal", 30, 460),
+    ("Shale Oil", 150, 370),                 ("Shale Oil", 150, 360),
+    ("Fuel Oil", 200, 270),                 ("Fuel Oil", 200, 320),
 ] 
 
 market_cap = 9000
@@ -174,25 +185,87 @@ class Room:
                 break
 
     def create_players_data(self):
+        # for d in self.players:
+        #     self.add_data(d.get_player_name(), 1, 0)
+        
+        # asset_indexes = list(range(len(assets)))
+        # for data in self.playersData:
+        #     for b in data.get_player_bids():
+        #         # Reset the asset index list if it's empty
+        #         if not asset_indexes:
+        #             asset_indexes = list(range(len(assets)))
+                
+        #         rand_asset = random.choice(asset_indexes)
+        #         asset_indexes.remove(rand_asset)
+                
+        #         b.set_asset_data(
+        #             assets[rand_asset][0], 
+        #             assets[rand_asset][2],
+        #             # random.randint(400, 800), 
+        #             assets[rand_asset][1]
+        #         )
+        # create player data entries first
+        # create player data entries first
         for d in self.players:
             self.add_data(d.get_player_name(), 1, 0)
 
+        # helper: decide which asset indexes are renewable / clean
+        renewable_keywords = [
+            "wind (onshore)",
+            "wind (offshore)",
+            "solar photovoltaic",
+            "concentrated solar power",
+            "large-scale hydropower",
+            "geothermal",
+            "biogas",
+            "tidal power",
+            "mini hydropower",
+            "energy storage",
+            "small modular reactors"
+        ]
+
+        def is_renewable(idx):
+            # assumes assets[idx][0] is the asset name/type string
+            name = str(assets[idx][0]).lower()
+            return any(keyword in name for keyword in renewable_keywords)
+
+        renewable_asset_indexes = [i for i in range(len(assets)) if is_renewable(i)]
+
         asset_indexes = list(range(len(assets)))
+
+        # flag so we only force a renewable once
+        forced_renewable_done = False
+
         for data in self.playersData:
             for b in data.get_player_bids():
-                # Reset the asset index list if it's empty
+
+            # Reset the asset index list if it's empty
                 if not asset_indexes:
                     asset_indexes = list(range(len(assets)))
-                
-                rand_asset = random.choice(asset_indexes)
-                asset_indexes.remove(rand_asset)
-                
+
+                # choose which asset index to use:
+                if not forced_renewable_done and renewable_asset_indexes:
+                    # first time through: force renewable
+                    rand_asset = random.choice(renewable_asset_indexes)
+                    forced_renewable_done = True
+
+                    # remove from pools so we don't immediately reuse it
+                    if rand_asset in asset_indexes:
+                        asset_indexes.remove(rand_asset)
+                    if rand_asset in renewable_asset_indexes:
+                        renewable_asset_indexes.remove(rand_asset)
+                else:
+                    # normal path (your existing behavior)
+                    rand_asset = random.choice(asset_indexes)
+                    asset_indexes.remove(rand_asset)
+
+                # assign asset data to this bid
                 b.set_asset_data(
-                    assets[rand_asset][0], 
-                    random.randint(400, 800), 
+                    assets[rand_asset][0],
+                    assets[rand_asset][2],
+                    # random.randint(400, 800),
                     assets[rand_asset][1]
                 )
-
     def get_sid_from_players(self, input_username):
         p = self.admin
         if input_username != self.admin.get_player_name():
