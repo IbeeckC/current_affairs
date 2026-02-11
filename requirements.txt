@@ -4,6 +4,7 @@ click==8.2.1
 dotenv==0.9.9
 Flask==3.1.2
 Flask-SocketIO==5.3.6
+gunicorn==25.0.3
 h11==0.16.0
 itsdangerous==2.2.0
 Jinja2==3.1.6
@@ -12,6 +13,7 @@ MarkupSafe==3.0.2
 netifaces==0.10.6
 numpy==2.3.2
 osqp==1.0.4
+packaging==26.0
 python-dotenv==1.1.1
 python-engineio==4.9.0
 python-socketio==5.11.2
