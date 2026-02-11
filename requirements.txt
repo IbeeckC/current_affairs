@@ -1,9 +1,12 @@
 bidict==0.23.1
 blinker==1.9.0
 click==8.2.1
+dnspython==2.8.0
 dotenv==0.9.9
+eventlet==0.40.4
 Flask==3.1.2
 Flask-SocketIO==5.3.6
+greenlet==3.3.1
 gunicorn==25.0.3
 h11==0.16.0
 itsdangerous==2.2.0
