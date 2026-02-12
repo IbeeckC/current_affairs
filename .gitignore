@@ -5,4 +5,5 @@ __pycache__/
 node_modules/
 static/js/marketGame*
 optimize_tests.py
-current_affairs_venv/
+current_affairs_venv/.DS_Store
+static/.DS_Store
