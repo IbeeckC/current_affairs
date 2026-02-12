@@ -82,10 +82,11 @@ $(document).ready(function() {
         (data["playerRoundRT"] || []).forEach(p => {
             roundRTByPlayer[p["player"]] = Number(p["gain"]) || 0;
         });
+        const removedIds = new Set(data["removedIds"] || []);
 
         const profitRows = Object.entries(profitsById).map(([id, info]) => {
             const roundDA = roundDAByPlayer[info.name] ?? 0;
-            const roundRT = roundRTByPlayer[info.name] ?? roundDA;
+            const roundRT = removedIds.has(id) ? 0 : (roundRTByPlayer[info.name] ?? 0);
             const change = roundRT - roundDA;
             const changeClass = change > 0 ? "positive" : (change < 0 ? "negative" : "");
             return `

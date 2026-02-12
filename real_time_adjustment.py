@@ -114,14 +114,22 @@ def apply_event_to_bids(
 
     elif event == "penalty_high_bid":
         meta["event_name"] = "Regulator Penalty on Cleared High Bidders"
-        alpha = 1.5
-        for b in event_bids:
-            if str(b["id"]) in cleared_ids and float(b["price"]) > alpha * float(market_price_DA):
-                b["price"] = 1.0  # force near-zero price to penalize manipulation
-                meta["penalized_ids"].append(b["id"])
-                meta["modified_ids"].append(b["id"])
-        if not meta["penalized_ids"]:
-            meta["notes"].append("No DA-cleared bidders exceeded the penalty threshold.")
+        # Penalize DA-cleared bidders whose price is an outlier among cleared prices
+        cleared_bids = [b for b in event_bids if str(b["id"]) in cleared_ids]
+        cleared_prices = [float(b["price"]) for b in cleared_bids]
+        if cleared_prices:
+            mean_p = float(np.mean(cleared_prices))
+            std_p = float(np.std(cleared_prices))
+            threshold = mean_p + (1.25 * std_p)
+            for b in cleared_bids:
+                if float(b["price"]) > threshold:
+                    b["price"] = 1.0  # force near-zero price to penalize manipulation
+                    meta["penalized_ids"].append(b["id"])
+                    meta["modified_ids"].append(b["id"])
+            if not meta["penalized_ids"]:
+                meta["notes"].append("No DA-cleared bidders exceeded the outlier threshold.")
+        else:
+            meta["notes"].append("No DA-cleared bidders; no outlier check.")
 
     else:
         meta["event_name"] = "Unrecognized Event"

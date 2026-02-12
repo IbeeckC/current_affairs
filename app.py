@@ -923,34 +923,7 @@ class GameNamespace(Namespace):
         rt_per_bid = rt_delta_per_bid
         rt_per_player = [{"player": p, "gain": g} for p, g in rt_delta_by_player.items()]
 
-        # If bidder removed by event, zero out TOTAL profit (not just round)
-        removed_ids = set(meta.get("removed_ids") or [])
-        if removed_ids:
-            bid_by_id = {b["id"]: b for b in sorted_bids}
-            rt_gain_by_player = {p["player"]: float(p["gain"]) for p in rt_per_player}
-
-            for bid_id in removed_ids:
-                bid = bid_by_id.get(bid_id)
-                if not bid:
-                    continue
-                current_total = float(bid["data"].get_profit())
-                if abs(current_total) < 1e-12:
-                    continue
-
-                # Wipe total profit to zero for removed bidders
-                bid["data"].add_to_profit(-current_total)
-
-                rt_per_bid.append({
-                    "player": bid["player"],
-                    "id": bid_id,
-                    "gain_RT": -current_total,
-                    "x_RT": float(x_rt_by_id.get(bid_id, 0.0)),
-                    "mc": float(bid["generation"]),
-                })
-
-                rt_gain_by_player[bid["player"]] = rt_gain_by_player.get(bid["player"], 0.0) - current_total
-
-            rt_per_player = [{"player": p, "gain": g} for p, g in rt_gain_by_player.items()]
+        # Note: removed bidders already get net-zero per round (delta = -DA).
 
         # Cumulative profit table AFTER RT settlement (include all original bids)
         player_profits = [
@@ -976,6 +949,7 @@ class GameNamespace(Namespace):
             "playerProfitsAE": sorted_player_profits,
             "playerGainsAE": sorted_player_gains_after_event,
             "playerRoundRT": sorted_round_rt,
+            "removedIds": list(meta.get("removed_ids") or []),
 
             "P_RT": float(P_RT),
             "delta_D": float(delta_D),
