@@ -18,6 +18,10 @@ body {
     color: var(--player-color);
 }
 
+h1, h2, label, p {
+    margin: 0;
+}
+
 button,
 input,
 select,
@@ -26,10 +30,13 @@ textarea {
   font-size: 100%;
 }
 
+button {
+    cursor: pointer;
+}
+
 input[type="submit"] {
     box-sizing: border-box;
-    cursor: pointer;
-    width: 75%;
+    width: 100%;
     padding: 7px;
     color: white;
     background-color: #343131;
@@ -42,52 +49,72 @@ input[type="text"] {
     border: 2px solid black;
     border-radius: 20px;
     padding: 7px 14px;
-    width: 75%;
+    width: 100%;
+}
+
+input[type="number"] {
+    box-sizing: border-box;
+    border: 2px solid black;
+    border-radius: 20px;
+    padding: 7px 14px;
+    width: 100%;
 }
 
 .gameplay-container {
     display: flex;
-    align-items: center;
-    gap: 50px;
+    align-items: flex-start;
+    gap: 32px;
+    width: min(1200px, calc(100% - 32px));
+    margin: 24px auto 0;
 }
 
 .player-action-container {
     display: flex;
     flex-direction: column;
+    gap: 20px;
+    flex: 1 1 280px;
 }
 
 .player-stats-container {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 20px;
+    align-items: flex-start;
+    gap: 16px;
 }
 
 .profit-container {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
+    flex: 1 1 320px;
+    min-width: 0;
 }
 
 .gains-container, .gains-container-AE {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
+    flex: 1 1 220px;
 }
 
 #assets-list {
     display: flex;
     flex-direction: column;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
+    width: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.06);
 }
 
 #bid-form {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 5px;
-    width: 70%;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
 }
 
 #playerProfits{
@@ -131,7 +158,6 @@ input[type="text"] {
 #leave-btn {
     justify-content: center;
     box-sizing: border-box;
-    cursor: pointer;
     padding: 7px;
     width: 150px;
     color: white;
@@ -142,7 +168,6 @@ input[type="text"] {
 #startNextRound{
     justify-content: center;
     box-sizing: border-box;
-    cursor: pointer;
     padding: 7px;
     width: 150px;
     color: rgb(0, 0, 0);
@@ -154,7 +179,6 @@ input[type="text"] {
 #nextGraphBtn{
     justify-content: center;
     box-sizing: border-box;
-    cursor: pointer;
     padding: 7px;
     width: 150px;
     color: rgb(0, 0, 0);
@@ -166,25 +190,29 @@ input[type="text"] {
 #submit {
     justify-content: center;
     box-sizing: border-box;
-    cursor: pointer;
     padding: 7px;
-    width: 75%;
+    width: 100%;
     color: white;
     background-color: rgb(45, 192, 60);
     border-radius: 20px;
     border: none;
 }
 
+#default {
+    width: 100%;
+}
+
 #myImage {
-  width: 600px;      
-  height: 400px;
+  width: min(100%, 900px);
+  height: auto;
+  max-height: 400px;
   object-fit: contain; /* Keeps image from stretching */
   visibility: hidden; /* Keeps space reserved */
 }
 
 .bidGraph {
-    margin: 50px 0px;
-    width: 80%;
+    margin: 32px auto 20px;
+    width: min(1200px, calc(100% - 32px));
     height: 600px;
     overflow: hidden;
 }
@@ -192,7 +220,40 @@ input[type="text"] {
 .form-container {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
+    width: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+#default-form {
+    width: 100%;
+}
+
+#graph-controls {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.table-scroll {
+    width: 100%;
+    overflow-x: auto;
+}
+
+#playerProfitTable {
+    width: 100%;
+    min-width: 320px;
+    border-collapse: collapse;
+}
+
+#playerProfitTable th,
+#playerProfitTable td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .bid-ready {
@@ -209,4 +270,67 @@ input[type="text"] {
 
 .negative {
     color: red;
+}
+
+@media (max-width: 768px) {
+    body {
+        justify-content: flex-start;
+    }
+
+    .gameplay-container {
+        flex-direction: column;
+        width: calc(100% - 24px);
+        gap: 20px;
+        margin-top: 16px;
+    }
+
+    .player-action-container,
+    .profit-container,
+    .gains-container,
+    .gains-container-AE {
+        width: 100%;
+    }
+
+    .player-stats-container h1,
+    .profit-container h1,
+    .gains-container h1,
+    .gains-container-AE h1 {
+        font-size: 1.4rem;
+    }
+
+    #assets-list,
+    .form-container {
+        padding: 16px;
+    }
+
+    input[type="text"],
+    input[type="number"],
+    input[type="submit"],
+    #leave-btn,
+    #startNextRound,
+    #nextGraphBtn {
+        min-height: 44px;
+        font-size: 1rem;
+    }
+
+    #graph-controls {
+        flex-direction: column;
+    }
+
+    #startNextRound,
+    #nextGraphBtn,
+    #leave-btn {
+        width: 100%;
+    }
+
+    .bidGraph {
+        width: calc(100% - 24px);
+        height: 360px;
+        margin: 20px auto 16px;
+    }
+
+    #myImage {
+        width: calc(100% - 24px);
+        max-height: 260px;
+    }
 }

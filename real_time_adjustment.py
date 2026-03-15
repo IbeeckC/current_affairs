@@ -397,10 +397,11 @@ def settle_real_time(bids, P_RT, y_by_id):
     print(f"[PROFIT][RT][TOTALS] {per_player_list}")
     return per_bid, per_player_list
 
-def compute_real_time_full(bids, P_RT, x_rt_by_id):
+def compute_real_time_full(bids, P_RT, x_rt_by_id, penalized_ids=None, penalized_settlement_price=1.0):
     """
     RT full re-clearing settlement:
-      gain_RT_full = (P_RT - cost) * x_RT
+      - normal bids:    gain_RT_full = (P_RT - cost) * x_RT
+      - penalized bids: gain_RT_full = (P_pen - cost) * x_RT
     Does NOT mutate PlayerData (caller applies deltas).
     Returns:
       - per_bid list
@@ -410,6 +411,8 @@ def compute_real_time_full(bids, P_RT, x_rt_by_id):
     per_bid = []
 
     P_RT = float(P_RT)
+    P_pen = float(penalized_settlement_price)
+    penalized_set = {str(bid_id) for bid_id in (penalized_ids or [])}
     print(f"[PROFIT][RT_FULL] P_RT={P_RT}")
 
     for b in bids:
@@ -417,13 +420,16 @@ def compute_real_time_full(bids, P_RT, x_rt_by_id):
         cost = float(b["generation"])
         x_rt = float(x_rt_by_id.get(bid_id, 0.0))
 
-        gain = (P_RT - cost) * x_rt
+        is_penalized = str(bid_id) in penalized_set
+        settlement_price = P_pen if is_penalized else P_RT
+        gain = (settlement_price - cost) * x_rt
         if abs(gain) < 1e-12:
             gain = 0.0
 
         print(
             f"[PROFIT][RT_FULL][BID] player={b['player']} id={bid_id} "
-            f"cost={cost} x_RT={x_rt} gain_RT_full={gain}"
+            f"cost={cost} x_RT={x_rt} settlement_price={settlement_price} "
+            f"penalized={is_penalized} gain_RT_full={gain}"
         )
 
         per_player[b["player"]] += gain
@@ -432,7 +438,9 @@ def compute_real_time_full(bids, P_RT, x_rt_by_id):
             "id": bid_id,
             "gain_RT_full": gain,
             "x_RT": x_rt,
-            "mc": cost
+            "mc": cost,
+            "settlement_price": settlement_price,
+            "penalized": is_penalized
         })
 
     per_player_list = [{"player": p, "gain": g} for p, g in per_player.items()]
