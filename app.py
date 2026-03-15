@@ -890,7 +890,9 @@ class GameNamespace(Namespace):
         rt_full_per_bid, rt_full_per_player = compute_real_time_full(
             bids=event_bids,
             P_RT=P_RT,
-            x_rt_by_id=x_rt_by_id
+            x_rt_by_id=x_rt_by_id,
+            penalized_ids=meta.get("penalized_ids", []),
+            penalized_settlement_price=1.0
         )
 
         rt_full_by_id = {b["id"]: float(b.get("gain_RT_full", 0.0)) for b in rt_full_per_bid}

@@ -84,7 +84,19 @@ $(document).ready(function() {
         });
         const removedIds = new Set(data["removedIds"] || []);
 
-        const profitRows = Object.entries(profitsById).map(([id, info]) => {
+        const profitRowsDA = Object.entries(profitsById).map(([id, info]) => {
+            const roundDA = roundDAByPlayer[info.name] ?? 0;
+            return `
+                <tr id="${id}" class="bid-unready">
+                    <td>${info.name}</td>
+                    <td>$${formatMoney(roundDA)}</td>
+                    <td>$0</td>
+                    <td>$${formatMoney(roundDA)}</td>
+                </tr>
+            `;
+        }).join("");
+
+        const profitRowsRT = Object.entries(profitsById).map(([id, info]) => {
             const roundDA = roundDAByPlayer[info.name] ?? 0;
             const roundRT = removedIds.has(id) ? 0 : (roundRTByPlayer[info.name] ?? 0);
             const change = roundRT - roundDA;
@@ -99,37 +111,48 @@ $(document).ready(function() {
             `;
         }).join("");
 
-        const gainsBeforeList = data["playerProfits"];
-        const gainsAfterList = data["playerProfitsAE"];
+        const cumulativeBeforeByPlayer = {};
+        (data["playerProfits"] || []).forEach((p) => {
+            cumulativeBeforeByPlayer[p["player"]] = Number(p["total"]) || 0;
+        });
+        const cumulativeAfterByPlayer = {};
+        (data["playerProfitsAE"] || []).forEach((p) => {
+            cumulativeAfterByPlayer[p["player"]] = Number(p["total"]) || 0;
+        });
 
-        const gains = gainsBeforeList.map(g => {
+        const gains = Object.entries(profitsById).map(([id, info]) => {
+            const player = info.name;
+            const total = cumulativeBeforeByPlayer[player] ?? 0;
             let color = ""
-            if (g["total"] > 0) {
+            if (total > 0) {
                 color = "positive"
-            } else if (g["total"] < 0) {
+            } else if (total < 0) {
                 color = "negative"
             }
-            return `<li>${g["player"]}: <span class=${color}>$${formatMoney(g["total"])}</span></li>`
+            return `<li>${player}: <span class=${color}>$${formatMoney(total)}</span></li>`
         }).join("");
 
-        const gains_AE = gainsAfterList.map(g => {
+        const gains_AE = Object.entries(profitsById).map(([id, info]) => {
+            const player = info.name;
+            const total = cumulativeAfterByPlayer[player] ?? 0;
             let color = ""
-            if (g["total"] > 0) {
+            if (total > 0) {
                 color = "positive"
-            } else if (g["total"] < 0) {
+            } else if (total < 0) {
                 color = "negative"
             }
-            return `<li>${g["player"]}: <span class=${color}>$${formatMoney(g["total"])}</span></li>`
+            return `<li>${player}: <span class=${color}>$${formatMoney(total)}</span></li>`
         }).join("");
 
-        $('#playerProfitTableBody').html(profitRows);
+        $('#playerProfitTableBody').html(profitRowsDA);
         $('#playerGains').html(gains);
         $('#round').html(data["roundNumber"]);
         $('#form-submit').html("<h1>Waiting for all bids...</h1>");
 
         currentPhase = 0;
         data_for_graph = data;
-        profits_gains["profits_table"] = profitRows;
+        profits_gains["profits_table_DA"] = profitRowsDA;
+        profits_gains["profits_table_RT"] = profitRowsRT;
         profits_gains["gains"] = gains;
         profits_gains["gains_AE"] = gains_AE;
         
@@ -322,9 +345,11 @@ $(document).ready(function() {
 
     function updateLeader(profits_gains, phase){
         if(phase ==0){
+            $('#playerProfitTableBody').html(profits_gains["profits_table_DA"]);
             $('#playerGains').html(profits_gains["gains"]);
         }
         else if(phase ==1){
+            $('#playerProfitTableBody').html(profits_gains["profits_table_RT"]);
             $('#playerGains').html(profits_gains["gains_AE"]);
         }
         else{
@@ -469,19 +494,21 @@ $(document).ready(function() {
                 shapes: shapes_list_before,
                 annotations: [
                     {
-                        x: Math.max(widthBar.reduce((acc, cur) => acc + cur, 0), demand),  
-                        y: Math.log10(marketPrice),
+                        xref: "paper",
+                        yref: "paper",
+                        x: 0.01,
+                        y: 0.99,
                         xanchor: "left",
-                        yanchor: "middle",
+                        yanchor: "top",
                         text: `Market Price: ${marketPrice}`,
-                        showarrow: true,
-                        arrowcolor: "red",
-                        ax: 20,  // Move the arrowhead to the right
-                        ay: 0,  // Keep the arrow aligned horizontally
+                        showarrow: false,
+                        bgcolor: "rgba(255,255,255,0.85)",
+                        bordercolor: "red",
+                        borderwidth: 1,
                         font: {
                             color: "red",
                             size: 14
-                        } // This is important
+                        }
                     },
                     // Demand Label
                     {
@@ -535,7 +562,11 @@ $(document).ready(function() {
                 $('#myImage').css('visibility', 'hidden');
             }
             else{
-                let imagePath = "/static/images/"+encodeURIComponent(event_tag)+".png";
+                const eventImageByTag = {
+                    penalty_high_bid: "regulator_intervention"
+                };
+                const imageBaseName = eventImageByTag[event_tag] || event_tag;
+                let imagePath = "/static/images/"+encodeURIComponent(imageBaseName)+".png";
                 $('#myImage').attr('src', imagePath).css('visibility', 'visible');;
             }
             
@@ -635,19 +666,21 @@ $(document).ready(function() {
                 shapes: shapes_list_AE,
                 annotations: [
                     {
-                        x: Math.max(widthBar_AE.reduce((acc, cur) => acc + cur, 0), demand_AE),  
-                        y: Math.log10(marketPrice_AE),
+                        xref: "paper",
+                        yref: "paper",
+                        x: 0.01,
+                        y: 0.99,
                         xanchor: "left",
-                        yanchor: "middle",
+                        yanchor: "top",
                         text: `Market Price: ${marketPrice_AE}`,
-                        showarrow: true,
-                        arrowcolor: "red",
-                        ax: 20,  // Move the arrowhead to the right
-                        ay: 0,  // Keep the arrow aligned horizontally
+                        showarrow: false,
+                        bgcolor: "rgba(255,255,255,0.85)",
+                        bordercolor: "red",
+                        borderwidth: 1,
                         font: {
                             color: "red",
                             size: 14
-                        } // This is important
+                        }
                     },
                     // Demand Label
                     {
