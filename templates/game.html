@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Work+Sans:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
@@ -10,81 +11,110 @@
     <link rel="stylesheet" href="/static/css/game.css">
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    <script type="module" src="{{ url_for('static', filename='js/game.js') }}"></script>  
-    <title>Game Screen</title>
+    <script type="module" src="{{ url_for('static', filename='js/game.js') }}"></script>
+    <title>Current Affairs &mdash; Game</title>
 </head>
 <body>
-    <div class="gameplay-container">
-        {% if not ctx["is_admin"] %}
-            <div class="player-action-container">
-                <div class="player-stats-container">
-                    <h1>Round <span id="round"></span></h1>
-                    <div id="assets-list"></div>
+    <header class="game-header">
+        <div class="header-brand">
+            <span class="brand-title">&#9889; Current Affairs</span>
+            <span class="brand-sub">Electricity Market Simulator</span>
+        </div>
+        <div class="header-center">
+            <span class="round-badge">Round <span id="round" class="round-num">&mdash;</span></span>
+        </div>
+        <div class="header-actions">
+            <button id="leave-btn">Leave Game</button>
+        </div>
+    </header>
+    <form method="POST" id="logout-form" action="{{ url_for('logout') }}" hidden>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    </form>
+
+    <main>
+        <div class="gameplay-container">
+            {% if not ctx["is_admin"] %}
+                <div class="player-action-container">
+                    <div class="panel">
+                        <div class="panel-header"><h2>Your Assets</h2></div>
+                        <div id="assets-list"></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-header"><h2>Submit Bid</h2></div>
+                        <form method="POST" id="bid-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <div class="field-group">
+                                <label for="quantity">Quantity (MW)</label>
+                                <input type="number" id="quantity" name="quantity" inputmode="numeric" min="0" step="1" placeholder="0">
+                            </div>
+                            <div class="field-group">
+                                <label for="price">Price ($/MWh)</label>
+                                <input type="number" id="price" name="price" inputmode="decimal" min="0" step="0.01" placeholder="0.00">
+                            </div>
+                            <input type="submit" id="submit" name="bid-submit" value="Submit Bid">
+                        </form>
+                        <form method="POST" id="default-form">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="default_quantity" value="d">
+                            <input type="submit" id="default" name="bid-default" value="Default Bid">
+                        </form>
+                        <div id="errMsg"></div>
+                    </div>
                 </div>
-                <div class="form-container">
-                    <form method="POST" id="bid-form">
-                        <label for="quantity">Quantity:</label>
-                        <input type="number" id="quantity" name="quantity" inputmode="numeric" min="0" step="1" placeholder="MW">
-                        <label for="price">Price:</label>
-                        <input type="number" id="price" name="price" inputmode="decimal" min="0" step="0.01" placeholder="$ / MWh">
-                        <input type="submit" id="submit" name="bid-submit" value="Submit Bid">
-                    </form>
-                    <form method="POST" id="default-form">
-                        <input type="hidden" name="default_quantity" value="d">
-                        <input type="submit" id="default" name="bid-default" value="Default Bid">
-                    </form>
+            {% else %}
+                <div class="player-action-container">
+                    <div class="panel">
+                        <div class="panel-header"><h2>Admin Controls</h2></div>
+                        <div id="form-submit"><h1>Waiting for all bids&hellip;</h1></div>
+                        <div id="errMsg"></div>
+                        <div id="graph-controls">
+                            <button id="startNextRound">&#9654; Start Next Round</button>
+                            <button id="nextGraphBtn">&#8652; Change Graph</button>
+                        </div>
+                    </div>
                 </div>
-                <div id="errMsg">
+            {% endif %}
+
+            <div class="profit-container">
+                <div class="panel">
+                    <div class="panel-header"><h2>Player Profit Summary</h2></div>
+                    <div class="table-scroll">
+                        <table id="playerProfitTable">
+                            <thead>
+                                <tr>
+                                    <th>Player</th>
+                                    <th>DA</th>
+                                    <th>RT &Delta;</th>
+                                    <th>Total</th>
+                                </tr>
+                            </thead>
+                            <tbody id="playerProfitTableBody">
+                                {% for player in ctx["room"]["playersData"] %}
+                                    <tr id="{{ player['id'] }}" class="bid-unready">
+                                        <td data-label="Player">{{ player["username"] }}</td>
+                                        <td data-label="DA">$0</td>
+                                        <td data-label="RT">$0</td>
+                                        <td data-label="Total">$0</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
-        {% else %}
-            <div class="player-action-container">
-                <div class="player-stats-container">
-                    <h1>Round <span id="round"></span></h1>
+
+            <div class="gains-container">
+                <div class="panel">
+                    <div class="panel-header"><h2>Round Gains</h2></div>
+                    <ol id="playerGains"></ol>
                 </div>
-                <div class="form-container">
-                    <div id="form-submit"><h1>Waiting for all bids...</h1></div>
-                    <div id="errMsg">
-                    </div>
-                    <div id="graph-controls">
-                        <button id="startNextRound"> Start Next Round</button>
-                        <button id="nextGraphBtn">Change Graph</button>
-                    </div>
-                </div>
-            </div>
-        {% endif %}
-        <div class="profit-container">
-            <h1>Player Profit Summary</h1>
-            <div class="table-scroll">
-                <table id="playerProfitTable">
-                    <thead>
-                        <tr>
-                            <th>Player Profit</th>
-                            <th>DA </th>
-                            <th>RT</th>
-                            <th>Total</th>
-                        </tr>
-                    </thead>
-                    <tbody id="playerProfitTableBody">
-                        {% for player in ctx["room"]["playersData"] %}
-                            <tr id="{{ player['id'] }}" class="bid-unready">
-                                <td>{{ player["username"] }}</td>
-                                <td>$0</td>
-                                <td>$0</td>
-                                <td>$0</td>
-                            </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
             </div>
         </div>
-        <div class="gains-container">
-            <h1>Player Round Gains</h1>
-            <ol id="playerGains"></ol>
+
+        <div class="chart-section">
+            <div class="bidGraph"></div>
         </div>
-        <img id="myImage" alt="Dynamic">
-    </div>
-    <div class="bidGraph"></div>
-    <button id="leave-btn">Leave</button>
+
+    </main>
 </body>
 </html>

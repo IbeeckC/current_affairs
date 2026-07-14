@@ -1,21 +1,23 @@
 import { io } from "https://cdn.socket.io/4.8.1/socket.io.esm.min.js";
 
 $(document).ready(function() {
-
-    const socket = io("/lobby");
+    const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+    const socket = io("/lobby", {
+        auth: { csrf_token: csrfToken }
+    });
 
     socket.on('player_left', (data) => {
         console.log("Last player")
-        location.href = '/logout'; 
+        document.querySelector('#logout-form')?.requestSubmit();
     });
 
     socket.on('user_change', (data) => {
         console.log(data);
-        $("#player-total").html(data["players"].length);
+        $("#player-total").text(data["players"].length);
 
-        $('#player-list').empty();
+        const playerList = $('#player-list').empty();
         $.each(data["players"], function (index, player) {
-            $('#player-list').append(`<li>${player["username"]}</li>`); 
+            $('<li>').text(player["username"]).appendTo(playerList);
         });
     });
 

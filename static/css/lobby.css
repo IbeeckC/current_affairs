@@ -1,83 +1,48 @@
 :root {
     --title-color: #EEDF7A;
-    --subTitle-color: #D8A25E;
-    --lobby-background: #343131;
-    --lobby-header: #484444;
-    --player-color: #f0f0f0;
-    --hr-color: black;
+    --subtitle-color: #D8A25E;
+    --bg-body: #1d1b1b;
+    --bg-header: #252222;
+    --bg-card: rgba(255, 255, 255, 0.055);
+    --border: rgba(255, 255, 255, 0.10);
+    --text-primary: #f0f0f0;
+    --text-muted: rgba(240, 240, 240, 0.50);
+    --success: #4CAF50;
+    --danger: #F45656;
+    --radius: 14px;
+    --radius-sm: 8px;
+    --radius-btn: 10px;
+    --shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+    --transition: 0.18s ease;
 }
 
-body {
-    font-family: "Work Sans", serif;
-    background-color: var(--lobby-background);
-}
+*, *::before, *::after { box-sizing: border-box; }
 
-button,
-input,
-select,
-textarea {
-  font-family: inherit;
-  font-size: 100%;
-}
+body { font-family: "Work Sans", sans-serif; background-color: var(--bg-body); color: var(--text-primary); margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
+button, input, select, textarea { font-family: inherit; font-size: 100%; }
 
+.lobby-header { background-color: var(--bg-header); border-bottom: 1px solid var(--border); width: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; padding: 24px 20px 20px; text-align: center; }
+.lobby-title { color: var(--title-color); font-size: 1.6rem; font-weight: 800; margin: 0; }
+.sub-color { color: var(--subtitle-color); }
+.players-title { color: var(--text-primary); font-size: 0.92rem; font-weight: 500; margin: 0; opacity: 0.8; }
 
-.lobby-header {
-    background-color: var(--lobby-header);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    gap: 20px;
-    font-size: 2rem;
-    padding: 20px 0px;
-}
+#player-list { list-style-type: none; padding: 24px 20px; margin: 0; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; min-height: 80px; max-width: 600px; width: 100%; }
+#player-list li { background: var(--bg-card); border: 1px solid var(--border); border-radius: 20px; padding: 6px 16px; font-size: 0.88rem; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 7px; }
+#player-list li::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
 
-.lobby-title {
-    color: var(--title-color);
-}
+.buttons { display: flex; justify-content: center; gap: 12px; padding: 8px 20px 32px; flex-wrap: wrap; }
 
-.sub-color {
-    color: var(--subTitle-color);
-}
+#start { box-sizing: border-box; cursor: pointer; padding: 10px 28px; color: white; background: linear-gradient(135deg, #2d7a35, #3a9944); border-radius: var(--radius-btn); border: none; font-weight: 700; font-size: 0.95rem; transition: all var(--transition); }
+#start:hover { background: linear-gradient(135deg, #3a9944, #47b352); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(74,179,82,0.3); }
+#start:active { transform: translateY(0); box-shadow: none; }
 
-.players-title {
-    color: var(--title-color);
-}
+#leave { box-sizing: border-box; cursor: pointer; padding: 10px 28px; color: var(--danger); background: rgba(244,86,86,0.10); border: 1px solid rgba(244,86,86,0.28); border-radius: var(--radius-btn); font-weight: 700; font-size: 0.95rem; transition: all var(--transition); }
+#leave:hover { background: rgba(244,86,86,0.20); border-color: rgba(244,86,86,0.50); transform: translateY(-1px); }
+#leave:active { transform: translateY(0); }
 
-#player-list {
-    color: var(--player-color);
-    list-style-type: none;
-    height: 200px;
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    align-items: center;
-    gap: 40px;
-}
-
-.buttons {
-    display: flex;
-    justify-content: center;
-}
-
-#start {
-    box-sizing: border-box;
-    cursor: pointer;
-    padding: 7px;
-    width: 150px;
-    color: white;
-    background-color: rgb(36, 108, 36);
-    border-radius: 20px;
-    border: none;
-}
-
-#leave {
-    box-sizing: border-box;
-    cursor: pointer;
-    padding: 7px;
-    width: 150px;
-    color: white;
-    background-color: rgb(244, 86, 86);
-    border-radius: 20px;
-    border: none;
+@media (max-width: 480px) {
+    .lobby-title { font-size: 1.3rem; }
+    #player-list { padding: 16px; }
+    .buttons { flex-direction: column; align-items: center; }
+    #start, #leave { width: 200px; text-align: center; }
 }

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Work+Sans:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
@@ -10,13 +11,13 @@
     <link rel="stylesheet" href="/static/css/lobby.css">
     <script type="module" src="{{ url_for('static', filename='js/client.js') }}"></script>
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-    <title>Lobby</title>
+    <title>Current Affairs &mdash; Lobby</title>
 </head>
 <body>
     <div class="lobby-header">
-        <h1 class="lobby-title">Lobby: <span class="sub-color">{{ ctx.room }}</span></h1>
-        <h2 class="players-title">Players: <span class="sub-color" id="player-total">0</span></h2>
-        <h2 class="players-title">Admin: <span class="sub-color">{{ ctx.admin }}</span></h2>
+        <h1 class="lobby-title">&#9889; Lobby: <span class="sub-color">{{ ctx.room }}</span></h1>
+        <p class="players-title">Players joined: <span class="sub-color" id="player-total">0</span></p>
+        <p class="players-title">Host: <span class="sub-color">{{ ctx.admin }}</span></p>
     </div>
     <ul id="player-list"></ul>
     <div class="buttons">
@@ -24,8 +25,9 @@
             <button id="start" value="start">Start Game</button>
         {% endif %}
         <div>
-            <form method="POST">
-                <button type="submit" id="leave" name="action" value="leave">Leave</button>
+            <form method="POST" id="logout-form" action="{{ url_for('logout') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" id="leave">Leave</button>
             </form>
         </div>
     </div>

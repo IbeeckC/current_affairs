@@ -1,5 +1,4 @@
 # real_time_market.py
-import copy
 from curses import meta
 import numpy as np
 import scipy.sparse as sp
@@ -97,6 +96,26 @@ def apply_event_to_bids(
         else:
             meta["notes"].append("No renewable bids to remove.")
 
+    elif event == "renewable_subsidies":
+        meta["event_name"] = "Renewable Subsidies"
+        renewables = {
+            "Wind (onshore)", "Wind (Offshore)", "Solar Photovoltaic", "Concentrated Solar Power",
+            "Large-Scale Hydropower", "Geothermal", "Biogas (Landfills)", "Tidal Power",
+            "Mini Hydropower", "Small Modular Reactors", "Energy Storage",
+            "Biomass (Agricultural Waste/Peat)"
+        }
+        subsidized_ids = []
+        for b in event_bids:
+            if b["asset"] in renewables:
+                b["generation"] = float(b["generation"]) - 10.0
+                subsidized_ids.append(b["id"])
+        if subsidized_ids:
+            meta["modified_ids"] = subsidized_ids[:]
+            meta["subsidized_ids"] = subsidized_ids
+            meta["notes"].append("Renewable marginal costs reduced by 10 for RT settlement.")
+        else:
+            meta["notes"].append("No renewable bids received the subsidy.")
+
     elif event == "remove_by_asset_name":
         meta["event_name"] = "Removed Some Bidders by Asset Name"
         removed = [b for b in event_bids if b["asset"] in set(selected_assets)]
@@ -130,6 +149,11 @@ def apply_event_to_bids(
                 meta["notes"].append("No DA-cleared bidders exceeded the outlier threshold.")
         else:
             meta["notes"].append("No DA-cleared bidders; no outlier check.")
+
+    elif event == "pay_as_bid":
+        meta["event_name"] = "Pay As Bid"
+        meta["pay_as_bid"] = True
+        meta["notes"].append("RT settlement uses each cleared bid's own price.")
 
     else:
         meta["event_name"] = "Unrecognized Event"
@@ -298,7 +322,7 @@ def _package_rt_results(event_bids, y, x_RT, P_RT, delta_D, status="solved"):
         "status": status
     }
 
-# Backwards-compatible wrappers and keys (safe to remove later)
+# Backwards-compatible wrappers and keys 
 def solve_intraday_qp(event_bids, demand_new, x_DA_by_id, lambda_reg=1e-4):
     return solve_real_time_dispatch_qp(event_bids, demand_new, x_DA_by_id, lambda_reg=lambda_reg)
 
@@ -397,11 +421,19 @@ def settle_real_time(bids, P_RT, y_by_id):
     print(f"[PROFIT][RT][TOTALS] {per_player_list}")
     return per_bid, per_player_list
 
-def compute_real_time_full(bids, P_RT, x_rt_by_id, penalized_ids=None, penalized_settlement_price=1.0):
+def compute_real_time_full(
+    bids,
+    P_RT,
+    x_rt_by_id,
+    penalized_ids=None,
+    penalized_settlement_price=1.0,
+    pay_as_bid=False,
+):
     """
     RT full re-clearing settlement:
       - normal bids:    gain_RT_full = (P_RT - cost) * x_RT
       - penalized bids: gain_RT_full = (P_pen - cost) * x_RT
+      - pay-as-bid:     gain_RT_full = (bid_price - cost) * x_RT
     Does NOT mutate PlayerData (caller applies deltas).
     Returns:
       - per_bid list
@@ -421,7 +453,10 @@ def compute_real_time_full(bids, P_RT, x_rt_by_id, penalized_ids=None, penalized
         x_rt = float(x_rt_by_id.get(bid_id, 0.0))
 
         is_penalized = str(bid_id) in penalized_set
-        settlement_price = P_pen if is_penalized else P_RT
+        if pay_as_bid:
+            settlement_price = float(b["price"])
+        else:
+            settlement_price = P_pen if is_penalized else P_RT
         gain = (settlement_price - cost) * x_rt
         if abs(gain) < 1e-12:
             gain = 0.0

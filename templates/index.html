@@ -2,39 +2,69 @@
 <html lang="en">
    <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="csrf-token" content="{{ csrf_token() }}">
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Work+Sans:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="/static/css/html5reset.css">
         <link rel="stylesheet" href="/static/css/index.css">
-        <title>Join Screen</title>
+        <title>Current Affairs &mdash; Join</title>
     </head>
     <body>
         <div class="main-container">
-            <div class="login-container">
-                <div class="title-container">
-                    <h1 class="title">Current Affairs</h1>
-                    <h2 class="sub-title">An Electricity Market Game</h2>
+            <div class="page-header">
+                <h1 class="title">&#9889; Current Affairs</h1>
+                <p class="sub-title">An Electricity Market Game</p>
+            </div>
+            <div class="page-layout">
+                <aside class="instructions-column">
+                    <div class="instruction-card">
+                        <div class="instruction-header">
+                            <span class="instruction-icon">&#9654;</span>
+                            <h3>Create a Room</h3>
+                        </div>
+                        <p>Enter your name in the <strong>Username</strong> box as the host, then click <strong>Create Room</strong>. A 4-letter room code will appear in the lobby &mdash; share it with your players so they can join.</p>
+                    </div>
+                    <div class="instruction-card">
+                        <div class="instruction-header">
+                            <span class="instruction-icon">&#128100;</span>
+                            <h3>Join a Room</h3>
+                        </div>
+                        <p>Enter your player name in the <strong>Username</strong> box. Then type the <strong>4-letter room code</strong> provided by your host (in ALL CAPS &mdash; e.g. <em>AJVG</em>) into the second box and click <strong>Join Room</strong>.</p>
+                    </div>
+                    <div class="instruction-card about-card">
+                        <div class="instruction-header">
+                            <span class="instruction-icon">&#128200;</span>
+                            <h3>About the Game</h3>
+                        </div>
+                        <p>Current Affairs is a simplified model of a modern electricity market. Each player is assigned generators with randomised types and capacity limits. Your goal is to maximise your profits by bidding strategically into the market each round.</p>
+                        <p>The market uses <strong>uniform pricing</strong> &mdash; the most expensive generator whose energy is needed to meet demand sets the price for <em>everyone</em> that round. Real-world events (demand spikes, policy changes, generator outages) will shake things up, so adapt fast or fall behind!</p>
+                    </div>
+                </aside>
+                <div class="login-container">
+                    <form class="form-container" method="POST">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="error-container">
+                            {% if ctx.err %}
+                                <p class="error-item">{{ ctx.msg }}</p>
+                            {% endif %}
+                        </div>
+                        <div class="form-items initial">
+                            <label for="username">Username</label>
+                            <input type="text" id="username" name="username" maxlength="24" autocomplete="off" placeholder="E.g. John, Anna&hellip;" value="{{ request.form.get('username', '') }}">
+                        </div>
+                        <div class="form-items">
+                            <input type="submit" name="action" value="Create Room">
+                        </div>
+                        <hr class="hr-text" data-content="OR">
+                        <div class="form-items">
+                            <label for="join-code">Room Code</label>
+                            <input type="text" id="join-code" name="join-code" maxlength="4" autocomplete="off" placeholder="E.g. AJVG" value="{{ request.form.get('join-code', '') }}">
+                            <input type="submit" name="action" value="Join Room">
+                        </div>
+                    </form>
                 </div>
-                <form class="form-container" method="POST">
-                    <div class="error-container">
-                        {% if ctx.err %}
-                            <p class="error-item">{{ ctx.msg }}</p>
-                        {% endif %}
-                    </div>
-                    <div class="form-items initial">
-                        <label for="username">Username:</label>
-                        <input type="text" id="username" name="username" autocomplete="off" placeholder="E.g. John, Anna, etc." value="{{ request.form['username'] }}">
-                    </div>
-                    <div class="form-items">
-                        <input type="submit" name="action" value="Create Room">
-                    </div>
-                    <hr class="hr-text" data-content="OR">
-                    <div class="form-items">
-                        <input type="text" id="join-code" name="join-code" autocomplete="off" placeholder="E.g. 'AJVG'" value="{{ request.form['join-code'] }}">
-                        <input type="submit" name="action" value="Join Room">
-                    </div>
-                </form>
             </div>
         </div>
     </body>

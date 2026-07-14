@@ -1,30 +1,286 @@
 
-from flask import Flask, request, session, render_template, redirect, url_for
+from datetime import timedelta
+from flask import Flask, abort, request, session, render_template, redirect, url_for
 from flask_socketio import SocketIO, Namespace, join_room, leave_room, disconnect, emit
 from functools import wraps
 from dotenv import load_dotenv
+from time import monotonic
 from urllib.parse import parse_qs
-from scipy.optimize import linprog
-import copy
+from werkzeug.middleware.proxy_fix import ProxyFix
 import numpy as np
 import scipy.sparse as sp
 from model import *
 from real_time_adjustment import apply_event_to_bids, solve_real_time_dispatch_qp, settle_day_ahead, settle_real_time, compute_real_time_full
+import os
 import osqp # for qpsolvers
+import re
+import secrets
+
 
 load_dotenv()
 
+MAX_USERNAME_LENGTH = 24
+MAX_SOCKET_FORM_LENGTH = 4096
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,23}$")
+ROOM_CODE_PATTERN = re.compile(r"^[A-Z]{4}$")
+ALLOWED_EVENTS = {
+    "high_dem",
+    "low_dem",
+    "high_bidder_remove",
+    "low_bidder_remove",
+    "tax_coal&nat_gas",
+    "remove_renewable",
+    "renewable_subsidies",
+    "remove_by_asset_name",
+    "remove_by_bid_price",
+    "penalty_high_bid",
+    "pay_as_bid",
+    "none",
+}
+
+
+def env_flag(name, default=False):
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_csv_env(name):
+    return [item.strip() for item in os.getenv(name, "").split(",") if item.strip()]
+
+
+secret_key = os.getenv("SECRET_KEY")
+if not secret_key:
+    secret_key = secrets.token_hex(32)
+    print("WARNING: SECRET_KEY is not set. Using a temporary secret key for this process.")
+
+allowed_origins = parse_csv_env("ALLOWED_ORIGINS")
+enforce_https = env_flag("ENFORCE_HTTPS", default=False)
+trust_proxy = env_flag("TRUST_PROXY", default=False)
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "secret_key"
-socketio = SocketIO(app, cors_allowed_origins='*', manage_session=False)
+app.wsgi_app = ProxyFix(
+    app.wsgi_app,
+    x_for=1,
+    x_proto=1,
+    x_host=1,
+    x_port=1,
+)
+app.config.update(
+    SECRET_KEY=secret_key,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=env_flag("SESSION_COOKIE_SECURE", default=False),
+    PREFERRED_URL_SCHEME="https" if enforce_https else "http",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+    MAX_CONTENT_LENGTH=int(os.getenv("MAX_CONTENT_LENGTH", "16384")),
+)
+
+if trust_proxy:
+    # Trust a single reverse proxy so Flask sees the original scheme/host.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+trusted_hosts = parse_csv_env("TRUSTED_HOSTS")
+if trusted_hosts:
+    app.config["TRUSTED_HOSTS"] = trusted_hosts
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=allowed_origins or None,
+    manage_session=False,
+)
 
 room_manager = RoomManager()
 
 DEBUG = True
+REQUEST_RATE_LIMITS = {
+    "index_post": (12, 60),
+}
+rate_limit_state = {}
 
 def dbg(*args):
     if DEBUG:
         print(*args)
+
+
+def client_identifier():
+    forwarded_for = request.headers.get("X-Forwarded-For", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def is_rate_limited(bucket_name):
+    limit, window_seconds = REQUEST_RATE_LIMITS[bucket_name]
+    now = monotonic()
+    key = (bucket_name, client_identifier())
+    timestamps = [
+        ts for ts in rate_limit_state.get(key, [])
+        if now - ts < window_seconds
+    ]
+    if len(timestamps) >= limit:
+        rate_limit_state[key] = timestamps
+        return True
+    timestamps.append(now)
+    rate_limit_state[key] = timestamps
+    return False
+
+
+def build_csp():
+    script_sources = [
+        "'self'",
+        "https://cdn.plot.ly",
+        "https://cdn.socket.io",
+        "https://code.jquery.com",
+    ]
+    style_sources = [
+        "'self'",
+        "'unsafe-inline'",
+        "https://fonts.googleapis.com",
+    ]
+    font_sources = [
+        "'self'",
+        "https://fonts.gstatic.com",
+    ]
+    connect_sources = ["'self'"]
+    if allowed_origins:
+        connect_sources.extend(allowed_origins)
+    return "; ".join([
+        "default-src 'self'",
+        f"script-src {' '.join(script_sources)}",
+        f"style-src {' '.join(style_sources)}",
+        f"font-src {' '.join(font_sources)}",
+        "img-src 'self' data:",
+        f"connect-src {' '.join(connect_sources)} ws: wss:",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+    ])
+
+
+CONTENT_SECURITY_POLICY = build_csp()
+
+
+def current_allowed_origins():
+    allowed = {request.host_url.rstrip("/")}
+    allowed.update(origin.rstrip("/") for origin in allowed_origins)
+    return allowed
+
+
+def origin_is_allowed(origin):
+    if not origin:
+        return True
+    return origin.rstrip("/") in current_allowed_origins()
+
+
+def generate_csrf_token():
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+def is_valid_csrf_token(token):
+    session_token = session.get("_csrf_token")
+    return bool(token and session_token and secrets.compare_digest(token, session_token))
+
+
+def normalize_username(raw_username):
+    username = (raw_username or "").strip()
+    if not username or len(username) > MAX_USERNAME_LENGTH:
+        return None
+    if not USERNAME_PATTERN.fullmatch(username):
+        return None
+    return username
+
+
+def normalize_room_code(raw_code):
+    room_code = (raw_code or "").strip().upper()
+    if not ROOM_CODE_PATTERN.fullmatch(room_code):
+        return None
+    return room_code
+
+
+def same_username(left, right):
+    return str(left).casefold() == str(right).casefold()
+
+
+def user_is_in_room(room_obj, username):
+    if room_obj is None or not username:
+        return False
+    return username == room_obj.get_admin() or room_obj.get_player(username) is not None
+
+
+def parse_socket_payload(data):
+    payload = (data or {}).get("data", "")
+    if not isinstance(payload, str) or len(payload) > MAX_SOCKET_FORM_LENGTH:
+        return None
+    return parse_qs(payload, keep_blank_values=False)
+
+
+def parse_scalar_value(raw_value):
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return raw_value
+
+
+def validate_socket_session(auth=None, require_started=None, allow_pending_lobby_join=False, require_csrf=False):
+    room = session.get("room")
+    name = session.get("name")
+    room_obj = room_manager.get_room(room)
+    token = (auth or {}).get("csrf_token") if isinstance(auth, dict) else None
+
+    if not room or not name or room_obj is None:
+        return None, None, None
+    if require_csrf and not is_valid_csrf_token(token):
+        return None, None, None
+    if not origin_is_allowed(request.headers.get("Origin")):
+        return None, None, None
+    if require_started is True and not room_obj.get_room_status():
+        return None, None, None
+    if require_started is False and room_obj.get_room_status():
+        return None, None, None
+    if not allow_pending_lobby_join and not user_is_in_room(room_obj, name):
+        return None, None, None
+    return room, name, room_obj
+
+
+@app.context_processor
+def inject_security_context():
+    return {"csrf_token": generate_csrf_token}
+
+
+@app.before_request
+def protect_state_changing_requests():
+    if enforce_https and not request.is_secure:
+        return redirect(request.url.replace("http://", "https://", 1), code=308)
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    if request.endpoint == "index" and is_rate_limited("index_post"):
+        abort(429)
+    if not origin_is_allowed(request.headers.get("Origin")):
+        abort(403)
+    token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+    if not is_valid_csrf_token(token):
+        abort(400)
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()"
+    if request.endpoint != "static":
+        response.headers["Cache-Control"] = "no-store"
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 EPS_CLEAR_ABS = 1e-2
 EPS_CLEAR_REL = 1e-3
@@ -333,30 +589,35 @@ def login_required(f):
         return f(*args, **kwargs)  # Otherwise, proceed to the game
     return decorated_function
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
-    session.pop("name", None)  
+    session.clear()
     return redirect(url_for("index"))
 
 @app.route('/', methods=['GET', 'POST'])
 @login_required
 def index():
     if request.method == 'POST':
-        username = request.form.get('username')
+        username = normalize_username(request.form.get('username'))
         action = request.form.get('action')
 
-        if not username or username.strip() == "":
-            context = { "err": True, "msg": "Enter a valid username" }
+        if username is None:
+            context = { "err": True, "msg": "Use 1-24 letters, numbers, spaces, dots, underscores, or hyphens for your username." }
             return render_template('index.html', ctx=context)
         if action == "Create Room":
+            session.clear()
             room_code = room_manager.create_room(username)
+            session.permanent = True
             session["room"] = room_code
             session["name"] = username
 
             print("Create Room")
             return redirect(url_for('lobby'))
         elif action == "Join Room":
-            code = request.form.get('join-code')
+            code = normalize_room_code(request.form.get('join-code'))
+            if code is None:
+                context = { "err": True, "msg": "Enter a valid 4-letter room code." }
+                return render_template('index.html', ctx=context)
             joining_room = room_manager.get_room(code)
 
             if joining_room is not None and joining_room.get_room_status():
@@ -366,10 +627,12 @@ def index():
             if joining_room is not None:
                 player_usernames = [player.username for player in room_manager.get_username_from_players_room(code)]
                 admin_username = room_manager.get_room(code).admin.username
-                if username in player_usernames or username == admin_username: # Ensure usernames are unique
+                if any(same_username(username, existing) for existing in player_usernames) or same_username(username, admin_username):
                     context = { "err": True, "msg": "Enter an Unused Username" }
                     return render_template('index.html', ctx=context)
                 else:
+                    session.clear()
+                    session.permanent = True
                     session["room"] = code
                     session["name"] = username
 
@@ -377,6 +640,8 @@ def index():
             else: 
                 context = { "err": True, "msg": "Room does not exist" }
                 return render_template('index.html', ctx=context)
+        context = { "err": True, "msg": "Choose a valid action." }
+        return render_template('index.html', ctx=context)
     context = { "err": False, "msg": "" }
     return render_template('index.html', ctx=context)
 
@@ -385,12 +650,6 @@ def index():
 def lobby():
     room = session.get("room")
     name = session.get("name")
-    
-    if request.method == "POST":
-        action = request.form.get('action')
-
-        if action == 'leave': 
-            return redirect(url_for('logout'))
     
     lobby_room = room_manager.get_room(room)
 
@@ -412,22 +671,25 @@ def game():
     return render_template('game.html', ctx=context)
 
 class LobbyNamespace(Namespace):
-    def on_connect(self):
-        room = session.get("room")
-        name = session.get("name")
+    def on_connect(self, auth=None):
+        room, name, lobby_room = validate_socket_session(
+            auth=auth,
+            require_started=False,
+            allow_pending_lobby_join=True,
+            require_csrf=True,
+        )
+        if lobby_room is None:
+            disconnect()
+            return
+
         print(f"{name} joined room {room}")
-        lobby_room = room_manager.get_room(room)
+        print(f"User {name} joined room {room}")
+        join_room(room)
 
-        if lobby_room is not None and name:
-            print(f"User {name} joined room {room}")
-            join_room(room)
+        if lobby_room.get_admin() != name and lobby_room.get_player(name) is None:
+            lobby_room.add_player(name)
 
-            if lobby_room.get_admin() != name:
-                lobby_room.add_player(name)
-
-            socketio.emit("user_change", lobby_room.get_json_room(), namespace='/lobby', to=room)
-        else:
-            socketio.emit("player_left", {'msg': "gone"}, namespace='/lobby', to=request.sid)
+        socketio.emit("user_change", lobby_room.get_json_room(), namespace='/lobby', to=room)
 
     def on_disconnect(self):
         room = session.get("room")
@@ -446,13 +708,16 @@ class LobbyNamespace(Namespace):
             room_manager.delete_room(room)
             return
 
-        lobby_room.remove_player(name)
+        if lobby_room.get_player(name) is not None:
+            lobby_room.remove_player(name)
+            socketio.emit("user_change", lobby_room.get_json_room(), namespace='/lobby', to=room)
 
-        socketio.emit("user_change", lobby_room.get_json_room(), namespace='/lobby', to=room)
-
-    def on_start_game(self, data):
-        room = session.get("room")
-        lobby_room = room_manager.get_room(room)
+    def on_start_game(self, auth_data=None):
+        room, name, lobby_room = validate_socket_session(require_started=False)
+        if lobby_room is None or lobby_room.get_admin() != name:
+            return
+        if lobby_room.get_room_status():
+            return
         
         lobby_room.create_players_data()
         lobby_room.set_room_status(True)
@@ -461,19 +726,21 @@ class LobbyNamespace(Namespace):
 
 
 class GameNamespace(Namespace):
-    def on_connect(self):
-        room = session.get("room")
-        name = session.get("name")
+    def on_connect(self, auth=None):
+        room, name, game_room = validate_socket_session(auth=auth, require_started=True, require_csrf=True)
+        if game_room is None:
+            disconnect()
+            return
+
         sid = request.sid
 
         join_room(room)
-        game_room = room_manager.get_room(room)
-
-        if game_room is not None:
-            print(f"User {name} SID updated: {sid}")
-            game_room.set_sid_from_players(name, sid)
-        else:
+        if game_room.get_admin() != name and game_room.get_player_data_object(name) is None:
             disconnect()
+            return
+
+        print(f"User {name} SID updated: {sid}")
+        game_room.set_sid_from_players(name, sid)
 
     def on_disconnect(self): #" took out reason"
         room = session.get("room")
@@ -481,14 +748,14 @@ class GameNamespace(Namespace):
         print("Game Disconnect")
     
     def on_get_stats(self):
-        room = session.get("room")
-        name = session.get("name")
-        game_room = room_manager.get_room(room)
+        room, name, game_room = validate_socket_session(require_started=True)
 
-        if game_room.get_admin() == name:
+        if game_room is None or game_room.get_admin() == name:
             return
         
         data = game_room.get_player_data(name)
+        if data is None:
+            return
         player_sid = game_room.get_sid_from_players(name)
 
         data["currentRound"] = game_room.get_current_round()
@@ -498,8 +765,9 @@ class GameNamespace(Namespace):
 
     def on_start_next_round(self):
         print("Start Next Round event received")
-        room = session.get("room")
-        game_room = room_manager.get_room(room)
+        room, name, game_room = validate_socket_session(require_started=True)
+        if game_room is None or game_room.get_admin() != name:
+            return
         players = game_room.get_json_room()["players"]
         for p in players:
             name = p["username"]
@@ -542,27 +810,21 @@ class GameNamespace(Namespace):
 
     def on_submit_bid(self, data):
         print("Submit Bid")
-        room = session.get("room")
-        name = session.get("name")
-        game_room = room_manager.get_room(room)
+        room, name, game_room = validate_socket_session(require_started=True)
+        if game_room is None or game_room.get_admin() == name:
+            return
+        player_data = game_room.get_player_data_object(name)
+        if player_data is None:
+            return
 
-        if game_room is None:
-            disconnect()
-
-        parsed_data = parse_qs(data.get('data', ''))
+        parsed_data = parse_socket_payload(data)
+        if parsed_data is None:
+            socketio.emit('bid_status', {'message': 'Invalid request payload.'}, namespace='/game', to=game_room.get_sid_from_players(name))
+            return
         parsed_data_clean = {}
 
         for key, values in parsed_data.items():
-            try:
-                # Try converting the value to an int
-                parsed_data_clean[key] = int(values[0])
-            except ValueError:
-                try:
-                    # If that fails, try converting the value to a float
-                    parsed_data_clean[key] = float(values[0])
-                except ValueError:
-                    # If both conversions fail, keep it as original type
-                    parsed_data_clean[key] = values[0]
+            parsed_data_clean[key] = parse_scalar_value(values[0])
         
         # Have They Already Placed a Bid
         if game_room.get_player_bid_status(name):
@@ -570,7 +832,7 @@ class GameNamespace(Namespace):
             return
 
         if 'default_quantity' in parsed_data_clean:
-            player_bid = game_room.get_player_data_object(name).get_player_single_bid()
+            player_bid = player_data.get_player_single_bid()
             player_bid.set_price_quantity(player_bid.get_generation(), player_bid.get_units())
         else:
             # Error Check data
@@ -581,20 +843,23 @@ class GameNamespace(Namespace):
             if 'price' not in parsed_data:
                 socketio.emit('bid_status', {'message': f'Enter a Price!'}, namespace='/game', to=game_room.get_sid_from_players(name))
                 return
+            if not isinstance(parsed_data_clean.get("price"), (int, float)) or not isinstance(parsed_data_clean.get("quantity"), (int, float)):
+                socketio.emit('bid_status', {'message': 'Enter numeric bid values.'}, namespace='/game', to=game_room.get_sid_from_players(name))
+                return
 
-            # Check price is valid and dosen't exceed market price
-            if (parsed_data_clean["price"] < 0 or parsed_data_clean["price"] > market_cap):
-                socketio.emit('bid_status', {'message': 'Enter a different price (ensure it is non-negative number below the market cap)'}, namespace='/game', to=game_room.get_sid_from_players(name))
+            # Allow negative bid prices, but still cap extreme positive bids.
+            if parsed_data_clean["price"] > market_cap:
+                socketio.emit('bid_status', {'message': 'Enter a different price (ensure it is a number below the market cap)'}, namespace='/game', to=game_room.get_sid_from_players(name))
                 return
             
-            player_quantity = game_room.get_player_data_object(name).get_all_player_units()
+            player_quantity = player_data.get_all_player_units()
             if (parsed_data_clean["quantity"] < 0 or parsed_data_clean["quantity"] > player_quantity):
                 socketio.emit('bid_status', {'message': f'Enter a different quantity (ensure it is non-negative number below the number of units you have ({player_quantity})'}, namespace='/game', to=game_room.get_sid_from_players(name))
                 return
             
-            game_room.get_player_data_object(name).get_player_single_bid().set_price_quantity(float(parsed_data_clean["price"]), float(parsed_data_clean["quantity"]))
+            player_data.get_player_single_bid().set_price_quantity(float(parsed_data_clean["price"]), float(parsed_data_clean["quantity"]))
         
-        game_room.get_player_data_object(name).set_bid_status(True)
+        player_data.set_bid_status(True)
         
         socketio.emit('bid_status', {'message': 'Bid successful!'}, namespace='/game', to=game_room.get_sid_from_players(name))
 
@@ -611,11 +876,11 @@ class GameNamespace(Namespace):
             asset_names.append(bid["asset"])
             bid_prices.append(bid["price"])
 
-        print(f"Submit Bid id: {game_room.get_player_data_object(name).get_id()}")
+        print(f"Submit Bid id: {player_data.get_id()}")
         data = {
             "allBid": allBid,
             "name": name,
-            "player_id": game_room.get_player_data_object(name).get_id(),
+            "player_id": player_data.get_id(),
             "marketUnits": marketUnits,
             "assetNames": asset_names,
             "bidPrices": bid_prices
@@ -627,10 +892,9 @@ class GameNamespace(Namespace):
 
     def on_run_round(self, data):
         print("Run Round")
-        
-        room = session.get("room")
-        name = session.get("name")
-        game_room = room_manager.get_room(room)
+        room, name, game_room = validate_socket_session(require_started=True)
+        if game_room is None:
+            return
         dbg("room:", room, "admin:", game_room.get_admin(), "caller:", name)
         dbg("raw payload:", data)
 
@@ -642,7 +906,10 @@ class GameNamespace(Namespace):
             socketio.emit('bid_status', {'message': f'Not everyone has voted!'}, namespace='/game', to=game_room.get_admin_sid())
             return
         
-        parsed_data = parse_qs(data.get('data', ''))
+        parsed_data = parse_socket_payload(data)
+        if parsed_data is None:
+            socketio.emit('bid_status', {'message': 'Invalid round payload.'}, namespace='/game', to=game_room.get_admin_sid())
+            return
         parsed_data_clean = {}
 
         multi_value_keys = {"assets", "bids"}
@@ -656,18 +923,20 @@ class GameNamespace(Namespace):
                     parsed_data_clean[key] = values  # always a list
             else:
                 # single value, try conversions
-                val = values[0]
-                try:
-                    parsed_data_clean[key] = int(val)
-                except ValueError:
-                    try:
-                        parsed_data_clean[key] = float(val)
-                    except ValueError:
-                        parsed_data_clean[key] = val
+                parsed_data_clean[key] = parse_scalar_value(values[0])
         dbg("parsed_data_clean keys:", list(parsed_data_clean.keys()))
         dbg("parsed_data_clean:", parsed_data_clean)
         dbg("slider:", parsed_data_clean.get("slider"), "demand field:", parsed_data_clean.get("demand"))        
-        event = parsed_data_clean["event"]
+        event = parsed_data_clean.get("event")
+        if event not in ALLOWED_EVENTS:
+            socketio.emit('bid_status', {'message': 'Choose a valid event.'}, namespace='/game', to=game_room.get_admin_sid())
+            return
+        if "slider" not in parsed_data_clean or not isinstance(parsed_data_clean["slider"], (int, float)):
+            socketio.emit('bid_status', {'message': 'Choose a valid demand value.'}, namespace='/game', to=game_room.get_admin_sid())
+            return
+        if parsed_data_clean["slider"] < 0:
+            socketio.emit('bid_status', {'message': 'Demand cannot be negative.'}, namespace='/game', to=game_room.get_admin_sid())
+            return
 
         all_bids = game_room.get_json_all_bids()
         sorted_bids = sorted(all_bids, key=lambda x: (x["price"], x["asset"]))
@@ -892,7 +1161,8 @@ class GameNamespace(Namespace):
             P_RT=P_RT,
             x_rt_by_id=x_rt_by_id,
             penalized_ids=meta.get("penalized_ids", []),
-            penalized_settlement_price=1.0
+            penalized_settlement_price=1.0,
+            pay_as_bid=bool(meta.get("pay_as_bid", False))
         )
 
         rt_full_by_id = {b["id"]: float(b.get("gain_RT_full", 0.0)) for b in rt_full_per_bid}
@@ -966,8 +1236,11 @@ class GameNamespace(Namespace):
     
     @socketio.on('change_phase', namespace='/game')
     def handle_change_phase(data):
-        phase = data.get('phase')
-        if phase is not None:
+        room, name, current_room = validate_socket_session(require_started=True)
+        if current_room is None or current_room.get_admin() != name:
+            return
+        phase = (data or {}).get('phase')
+        if phase in (0, 1):
             print(f"[SERVER] Received change_phase to: {phase}")
             # Broadcast to all clients in the namespace
             emit('update_phase', {'phase': phase}, namespace='/game', broadcast=True)
